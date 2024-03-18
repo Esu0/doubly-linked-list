@@ -1,7 +1,7 @@
 use std::{
     fmt::{self, Debug},
     marker::PhantomData,
-    mem::ManuallyDrop,
+    mem::{self, ManuallyDrop},
     ops::{Deref, DerefMut},
     ptr::NonNull,
 };
@@ -376,35 +376,31 @@ impl<'a, T: ?Sized> Cursor<'a, T> {
             false
         }
     }
-
-    pub fn next(self) -> Option<Self> {
-        unsafe { self.0.as_ref().next }.map(|next| Self(next, PhantomData))
-    }
-
-    pub fn prev(self) -> Option<Self> {
-        unsafe { self.0.as_ref().prev }.map(|prev| Self(prev, PhantomData))
-    }
 }
 
-pub struct CursorMut<'a, T: ?Sized>(NonNull<Node<T>>, PhantomData<&'a mut LinkedList<T>>);
+pub struct CursorMut<'a, T: ?Sized> {
+    ptr: NonNull<Node<T>>,
+    list: &'a mut LinkedList<T>,
+}
 
 impl<T: ?Sized> Deref for CursorMut<'_, T> {
     type Target = T;
     fn deref(&self) -> &Self::Target {
-        unsafe { &self.0.as_ref().value }
+        unsafe { &self.ptr.as_ref().value }
     }
 }
 
 impl<T: ?Sized> DerefMut for CursorMut<'_, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { &mut self.0.as_mut().value }
+        unsafe { &mut self.ptr.as_mut().value }
     }
 }
 
 impl<'a, T: ?Sized> CursorMut<'a, T> {
+    // 次の要素に移動
     pub fn move_next(&mut self) -> bool {
-        if let Some(next) = unsafe { self.0.as_ref().next } {
-            self.0 = next;
+        if let Some(next) = unsafe { self.ptr.as_ref().next } {
+            self.ptr = next;
             true
         } else {
             false
@@ -412,34 +408,49 @@ impl<'a, T: ?Sized> CursorMut<'a, T> {
     }
 
     pub fn move_prev(&mut self) -> bool {
-        if let Some(prev) = unsafe { self.0.as_ref().prev } {
-            self.0 = prev;
+        if let Some(prev) = unsafe { self.ptr.as_ref().prev } {
+            self.ptr = prev;
             true
         } else {
             false
         }
     }
 
-    pub fn next(self) -> Result<Self, Self> {
-        unsafe { self.0.as_ref().next }
-            .map(|next| Self(next, PhantomData))
-            .ok_or(self)
+    pub fn remove_current(&mut self) {
+        drop(self.cut_node_current());
     }
 
-    pub fn prev(self) -> Result<Self, Self> {
-        unsafe { self.0.as_ref().prev }
-            .map(|prev| Self(prev, PhantomData))
-            .ok_or(self)
+    fn node(&mut self) -> &Node<T> {
+        unsafe { self.ptr.as_ref() }
     }
 
-    pub fn remove_current(self) {
-        todo!()
+    fn node_mut(&mut self) -> &mut Node<T> {
+        unsafe { self.ptr.as_mut() }
+    }
+
+    fn cut_node_current(&mut self) -> Box<Node<T>> {
+        let node = self.node();
+        let prev = node.prev;
+        let next = node.next;
+        if let Some(mut prev) = prev {
+            unsafe { prev.as_mut().next = next; }
+        } else {
+            self.list.head = next;
+        }
+
+        if let Some(mut next) = next {
+            unsafe { next.as_mut().prev = prev; }
+        } else {
+            self.list.tail = prev;
+        }
+        // TODO: リストが空になる場合にどうするか
+        unsafe { Box::from_raw(mem::replace(&mut self.ptr, next.unwrap()).as_ptr()) }
     }
 }
 
 impl<'a, T> CursorMut<'a, T> {
-    pub fn cut_current(self) -> T {
-        todo!()
+    pub fn cut_current(&mut self) -> T {
+        self.cut_node_current().value
     }
 }
 #[cfg(test)]
