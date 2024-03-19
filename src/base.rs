@@ -1,8 +1,8 @@
 use std::{
     fmt::{self, Debug},
     marker::PhantomData,
-    mem::{self, ManuallyDrop},
-    ops::{Deref, DerefMut},
+    mem::ManuallyDrop,
+    ops::Deref,
     ptr::NonNull,
 };
 
@@ -152,11 +152,13 @@ impl<T: ?Sized> LinkedList<T> {
     }
 
     pub fn cursor_front(&self) -> Option<Cursor<'_, T>> {
-        self.head.map(|head| Cursor(head, PhantomData))
+        self.indexer_front()
+            .map(|indexer| Cursor(indexer, PhantomData))
     }
 
     pub fn cursor_back(&self) -> Option<Cursor<'_, T>> {
-        self.tail.map(|tail| Cursor(tail, PhantomData))
+        self.indexer_back()
+            .map(|indexer| Cursor(indexer, PhantomData))
     }
 
     pub fn indexer_front(&self) -> Option<Indexer<T>> {
@@ -340,7 +342,89 @@ impl<T: ?Sized> Default for LinkedList<T> {
 }
 
 pub struct Indexer<T: ?Sized>(NonNull<Node<T>>);
-pub struct Cursor<'a, T: ?Sized>(NonNull<Node<T>>, PhantomData<&'a LinkedList<T>>);
+
+impl<T: ?Sized> Clone for Indexer<T> {
+    fn clone(&self) -> Self {
+        Self(self.0)
+    }
+}
+
+impl<T: ?Sized> Copy for Indexer<T> {}
+
+impl<T: ?Sized> Indexer<T> {
+    unsafe fn into_boxed_node(self) -> Box<Node<T>> {
+        Box::from_raw(self.0.as_ptr())
+    }
+
+    unsafe fn get<'a>(self) -> &'a Node<T> {
+        &*self.0.as_ptr()
+    }
+
+    unsafe fn get_mut<'a>(self) -> &'a mut Node<T> {
+        &mut *self.0.as_ptr()
+    }
+
+    /// # Safety
+    /// * `self`の差すノードが有効である
+    pub unsafe fn next(self) -> Option<Self> {
+        self.0.as_ref().next.map(Self)
+    }
+
+    /// # Safety
+    /// * `self`の差すノードが有効である
+    pub unsafe fn prev(self) -> Option<Self> {
+        self.0.as_ref().prev.map(Self)
+    }
+}
+
+impl<T: ?Sized> LinkedList<T> {
+    /// # Safety
+    /// * `index`の指すノードがリスト`self`が所有する有効なノードである
+    pub unsafe fn remove(&mut self, index: Indexer<T>) {
+        drop(self.cut_node(index));
+    }
+
+    unsafe fn cut_node(&mut self, index: Indexer<T>) -> Box<Node<T>> {
+        let (prev, next) = {
+            let node = index.0.as_ref();
+            (node.prev, node.next)
+        };
+
+        if let Some(mut prev) = prev {
+            prev.as_mut().next = next;
+        } else {
+            self.head = next;
+        }
+
+        if let Some(mut next) = next {
+            next.as_mut().prev = prev;
+        } else {
+            self.tail = prev;
+        }
+
+        index.into_boxed_node()
+    }
+
+    /// # Safety
+    /// * `index`の指すノードがリスト`self`が所有する有効なノードである
+    pub unsafe fn get(&self, index: Indexer<T>) -> &T {
+        &(*index.0.as_ptr()).value
+    }
+
+    /// # Safety
+    /// * `index`の指すノードがリスト`self`が所有する有効なノードである
+    pub unsafe fn get_mut(&mut self, index: Indexer<T>) -> &mut T {
+        &mut (*index.0.as_ptr()).value
+    }
+
+    /// # Safety
+    /// * `index`の指すノードがリスト`self`が所有する有効なノードである
+    pub unsafe fn get_cursor(&self, index: Indexer<T>) -> Cursor<'_, T> {
+        Cursor(index, PhantomData)
+    }
+}
+
+pub struct Cursor<'a, T: ?Sized>(Indexer<T>, PhantomData<&'a LinkedList<T>>);
 
 impl<T: ?Sized> Clone for Cursor<'_, T> {
     fn clone(&self) -> Self {
@@ -354,105 +438,87 @@ impl<T: ?Sized> Deref for Cursor<'_, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        unsafe { &self.0.as_ref().value }
+        unsafe { &self.0.get().value }
     }
 }
 
 impl<'a, T: ?Sized> Cursor<'a, T> {
-    pub fn move_next(&mut self) -> bool {
-        if let Some(next) = unsafe { self.0.as_ref().next } {
-            self.0 = next;
-            true
-        } else {
-            false
-        }
+    /// 一つ次のノードを指すカーソルを返す。一つ次のノードが存在しない場合は`None`を返す。
+    pub fn next(self) -> Option<Self> {
+        unsafe { self.0.next().map(|next| Self(next, PhantomData)) }
     }
 
-    pub fn move_prev(&mut self) -> bool {
-        if let Some(prev) = unsafe { self.0.as_ref().prev } {
-            self.0 = prev;
-            true
-        } else {
-            false
-        }
+    /// 一つ前のノードを指すカーソルを返す。一つ前のノードが存在しない場合は`None`を返す。
+    pub fn prev(self) -> Option<Self> {
+        unsafe { self.0.prev().map(|prev| Self(prev, PhantomData)) }
     }
 }
 
 pub struct CursorMut<'a, T: ?Sized> {
-    ptr: NonNull<Node<T>>,
+    index: Option<Indexer<T>>,
     list: &'a mut LinkedList<T>,
 }
 
-impl<T: ?Sized> Deref for CursorMut<'_, T> {
-    type Target = T;
-    fn deref(&self) -> &Self::Target {
-        unsafe { &self.ptr.as_ref().value }
-    }
-}
-
-impl<T: ?Sized> DerefMut for CursorMut<'_, T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { &mut self.ptr.as_mut().value }
-    }
-}
-
 impl<'a, T: ?Sized> CursorMut<'a, T> {
-    // 次の要素に移動
-    pub fn move_next(&mut self) -> bool {
-        if let Some(next) = unsafe { self.ptr.as_ref().next } {
-            self.ptr = next;
-            true
-        } else {
-            false
+    /// カーソルを一つ次のノードに移動する。一つ次のノードが存在しない場合はダミーノードを指すように変更される。
+    pub fn move_next(&mut self) {
+        if let Some(index) = self.index {
+            self.index = unsafe { index.next() };
         }
     }
 
-    pub fn move_prev(&mut self) -> bool {
-        if let Some(prev) = unsafe { self.ptr.as_ref().prev } {
-            self.ptr = prev;
-            true
-        } else {
-            false
+    /// カーソルを一つ前のノードに移動する。一つ前のノードが存在しない場合はダミーノードを指すように変更される。
+    pub fn move_prev(&mut self) {
+        if let Some(index) = self.index {
+            self.index = unsafe { index.prev() };
         }
     }
 
+    /// 現在指しているノードをリストから削除する。このとき、カーソルを次のノードに移動する。
+    /// 現在指しているノードがダミーノードなら何もしない。
     pub fn remove_current(&mut self) {
         drop(self.cut_node_current());
     }
 
-    fn node(&mut self) -> &Node<T> {
-        unsafe { self.ptr.as_ref() }
+    /// 現在指しているノードの値の共有参照を取得する。ダミーノードを指している場合は`None`を返す。
+    pub fn get(&self) -> Option<&T> {
+        self.node().map(|node| &node.value)
     }
 
-    fn node_mut(&mut self) -> &mut Node<T> {
-        unsafe { self.ptr.as_mut() }
+    /// 現在指しているノードの値の排他参照を取得する。ダミーノードを指している場合は`None`を返す。
+    pub fn get_mut(&mut self) -> Option<&mut T> {
+        self.node_mut().map(|node| &mut node.value)
     }
 
-    fn cut_node_current(&mut self) -> Box<Node<T>> {
-        let node = self.node();
-        let prev = node.prev;
-        let next = node.next;
-        if let Some(mut prev) = prev {
-            unsafe { prev.as_mut().next = next; }
-        } else {
-            self.list.head = next;
-        }
+    /// ダミーノードを指している場合に`true`を返し、それ以外のときに`false`を返す
+    pub const fn is_dummy(&self) -> bool {
+        self.index.is_none()
+    }
 
-        if let Some(mut next) = next {
-            unsafe { next.as_mut().prev = prev; }
-        } else {
-            self.list.tail = prev;
-        }
-        // TODO: リストが空になる場合にどうするか
-        unsafe { Box::from_raw(mem::replace(&mut self.ptr, next.unwrap()).as_ptr()) }
+    fn node(&self) -> Option<&Node<T>> {
+        unsafe { self.index.map(|index| index.get()) }
+    }
+
+    fn node_mut(&mut self) -> Option<&mut Node<T>> {
+        unsafe { self.index.map(|index| index.get_mut()) }
+    }
+
+    fn cut_node_current(&mut self) -> Option<Box<Node<T>>> {
+        self.index.map(|index| unsafe {
+            self.index = index.next();
+            self.list.cut_node(index)
+        })
     }
 }
 
 impl<'a, T> CursorMut<'a, T> {
-    pub fn cut_current(&mut self) -> T {
-        self.cut_node_current().value
+    /// 現在指しているノードをリストから削除して値を返す。このとき、カーソルを次のノードに移動する。
+    /// 現在指しているノードがダミーノードなら何もしない。
+    pub fn cut_current(&mut self) -> Option<T> {
+        self.cut_node_current().map(|node| node.value)
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
