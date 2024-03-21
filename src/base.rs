@@ -1,7 +1,7 @@
 use std::{
     fmt::{self, Debug},
     marker::PhantomData,
-    mem::ManuallyDrop,
+    mem::{self, ManuallyDrop},
     ops::Deref,
     ptr::NonNull,
 };
@@ -205,6 +205,10 @@ impl<T: ?Sized> LinkedList<T> {
         }
         other.head = None;
         other.tail = None;
+    }
+
+    pub fn clear(&mut self) {
+        *self = Self::new();
     }
 
     fn get_head_tail(&self) -> Option<(NonNull<Node<T>>, NonNull<Node<T>>)> {
@@ -609,25 +613,65 @@ impl<'a, T: ?Sized> CursorMut<'a, T> {
         self.list
     }
 
-    pub fn splice_next(&mut self, list: LinkedList<T>) {
+    pub fn splice_after(&mut self, list: LinkedList<T>) {
         let Some((mut list_head, mut list_tail)) = list.get_head_tail() else {
+            // リストは空なので何もしない
             return;
         };
-        std::mem::forget(list);
+        // `LinkedList::drop()`を呼ばないようにする
+        mem::forget(list);
         unsafe {
+            // `list`の末尾とリンクすべきノード
             let next = if let Some(indexer) = self.indexer {
+                // ダミーノードを指していない => 先頭ノードの変更はなし
+                list_head.as_mut().prev = Some(indexer.0);
                 indexer.get_mut().next.replace(list_head)
+
+                // `indexer.get_mut().next`が`None`のときは末尾に挿入することになる
+                // よって、`list`の末尾とリンクすべきノードは存在しない
             } else {
+                debug_assert!(list_head.as_ref().prev.is_none());
+                // ダミーノードを指している => 先頭ノードを変更
+                // `(*list_head).prev`は`None`であることが保証されているため
+                // 変更しなくてよい
                 self.list.head.replace(list_head)
+
+                // `self.list.head`が`None`のときはリストが空であるから、
+                //　`list`の末尾とリンクすべきノードは存在しない
             };
-            list_head.as_mut().prev = self.indexer.map(|indexer| indexer.0);
 
             if let Some(mut next) = next {
                 next.as_mut().prev = Some(list_tail);
+                list_tail.as_mut().next = Some(next);
             } else {
+                debug_assert!(list_tail.as_ref().next.is_none());
+                // `next`が`None`のときは末尾ノードを変更する必要がある
                 self.list.tail = Some(list_tail);
             }
-            list_tail.as_mut().next = next;
+        }
+    }
+
+    pub fn splice_before(&mut self, list: LinkedList<T>) {
+        let Some((mut list_head, mut list_tail)) = list.get_head_tail() else {
+            return;
+        };
+        mem::forget(list);
+        unsafe {
+            let prev = if let Some(indexer) = self.indexer {
+                list_tail.as_mut().next = Some(indexer.0);
+                indexer.get_mut().prev.replace(list_tail)
+            } else {
+                debug_assert!(list_tail.as_ref().next.is_none());
+                self.list.tail.replace(list_tail)
+            };
+
+            if let Some(mut prev) = prev {
+                prev.as_mut().next = Some(list_head);
+                list_head.as_mut().prev = Some(prev);
+            } else {
+                debug_assert!(list_head.as_ref().prev.is_none());
+                self.list.head = Some(list_head);
+            }
         }
     }
 }
@@ -784,5 +828,52 @@ mod tests {
         cursor.move_next();
         cursor.insert_after(29);
         assert!(cursor.list().iter().eq(&[25, 28, 29, 30]));
+    }
+
+    #[test]
+    fn splice_test() {
+        let mut list = (-3i32..4).collect::<LinkedList<_>>();
+        let mut cursor = list.cursor_back_mut();
+        for _ in 0..3 {
+            cursor.move_prev();
+        }
+        let list2 = [7, 10, 11].into_iter().collect::<LinkedList<_>>();
+        assert_eq!(cursor.cut_current().unwrap(), 0);
+        cursor.move_prev();
+        cursor.splice_after(list2);
+        assert!(cursor.list().iter().eq(&[-3, -2, -1, 7, 10, 11, 1, 2, 3]));
+
+        let mut cursor = list.cursor_back_mut();
+        cursor.splice_after([0, -3].into_iter().collect());
+        assert!(cursor
+            .list()
+            .iter()
+            .eq(&[-3, -2, -1, 7, 10, 11, 1, 2, 3, 0, -3]));
+
+        cursor.splice_after(LinkedList::new());
+        assert!(cursor
+            .list()
+            .iter()
+            .eq(&[-3, -2, -1, 7, 10, 11, 1, 2, 3, 0, -3]));
+
+        let mut cursor = list.cursor_back_mut();
+        cursor.splice_after(LinkedList::new());
+        assert!(cursor
+            .list()
+            .iter()
+            .eq(&[-3, -2, -1, 7, 10, 11, 1, 2, 3, 0, -3]));
+
+        list.clear();
+        let mut cursor = list.cursor_front_mut();
+        cursor.splice_before([1, 2, 3, 4].into_iter().collect());
+        assert!(cursor.list().iter().eq(&[1, 2, 3, 4]));
+
+        cursor.splice_before([5, 6].into_iter().collect());
+        assert!(cursor.list().iter().copied().eq(1..=6));
+        let tail_old = cursor.list().indexer_back().unwrap();
+        cursor.list().append(&mut [9, 10, 11].into_iter().collect());
+        unsafe { cursor.set_index(tail_old) };
+        cursor.splice_after([7, 8].into_iter().collect());
+        assert!(cursor.list().iter().copied().eq(1..=11));
     }
 }
