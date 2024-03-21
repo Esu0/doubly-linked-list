@@ -161,14 +161,14 @@ impl<T: ?Sized> LinkedList<T> {
             .map(|indexer| Cursor(indexer, PhantomData))
     }
 
-    pub fn cursor_mut_front(&mut self) -> CursorMut<'_, T> {
+    pub fn cursor_front_mut(&mut self) -> CursorMut<'_, T> {
         CursorMut {
             index: self.indexer_front(),
             list: self,
         }
     }
 
-    pub fn cursor_mut_back(&mut self) -> CursorMut<'_, T> {
+    pub fn cursor_back_mut(&mut self) -> CursorMut<'_, T> {
         CursorMut {
             index: self.indexer_back(),
             list: self,
@@ -678,7 +678,7 @@ mod tests {
     #[test]
     fn cursor_test() {
         let mut list = [2, 4, 5, 6, 8].into_iter().collect::<LinkedList<_>>();
-        let mut cursor = list.cursor_mut_front();
+        let mut cursor = list.cursor_front_mut();
         assert!(!cursor.is_dummy());
         cursor.move_next();
         assert!(!cursor.is_dummy());
