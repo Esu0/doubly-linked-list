@@ -674,6 +674,52 @@ impl<'a, T: ?Sized> CursorMut<'a, T> {
             }
         }
     }
+
+    pub fn split_after(&mut self) -> LinkedList<T> {
+        unsafe {
+            if let Some(indexer) = self.indexer {
+                let head = indexer.get_mut().next.take();
+                if let Some(mut head) = head {
+                    let tail = self.list.tail.replace(indexer.0);
+                    head.as_mut().prev = None;
+                    LinkedList {
+                        head: Some(head),
+                        tail,
+                    }
+                } else {
+                    LinkedList::new()
+                }
+            } else {
+                LinkedList {
+                    head: self.list.head.take(),
+                    tail: self.list.tail.take(),
+                }
+            }
+        }
+    }
+
+    pub fn split_before(&mut self) -> LinkedList<T> {
+        unsafe {
+            if let Some(indexer) = self.indexer {
+                let tail = indexer.get_mut().prev.take();
+                if let Some(mut tail) = tail {
+                    let head = self.list.head.replace(indexer.0);
+                    tail.as_mut().next = None;
+                    LinkedList {
+                        head,
+                        tail: Some(tail),
+                    }
+                } else {
+                    LinkedList::new()
+                }
+            } else {
+                LinkedList {
+                    head: self.list.head.take(),
+                    tail: self.list.tail.take(),
+                }
+            }
+        }
+    }
 }
 
 impl<'a, T> CursorMut<'a, T> {
@@ -875,5 +921,26 @@ mod tests {
         unsafe { cursor.set_index(tail_old) };
         cursor.splice_after([7, 8].into_iter().collect());
         assert!(cursor.list().iter().copied().eq(1..=11));
+    }
+
+    #[test]
+    fn split_test() {
+        let mut list = LinkedList::new();
+        let mut cursor = list.cursor_front_mut();
+
+        cursor.splice_after((3i32..6).collect());
+        cursor.move_next();
+        cursor.splice_before((3..6).rev().collect());
+        assert!(cursor.list().iter().eq(&[5, 4, 3, 3, 4, 5]));
+
+        cursor.move_prev();
+        cursor.move_prev();
+        let splitted = cursor.split_after();
+        assert!(splitted.iter().eq(&[3, 3, 4, 5]));
+        assert!(list.iter().eq(&[5, 4]));
+
+        let mut cursor = list.cursor_front_mut();
+        cursor.splice_before(splitted);
+        assert!(list.iter().eq(&[3, 3, 4, 5, 5, 4]));
     }
 }
