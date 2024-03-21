@@ -161,12 +161,50 @@ impl<T: ?Sized> LinkedList<T> {
             .map(|indexer| Cursor(indexer, PhantomData))
     }
 
+    pub fn cursor_mut_front(&mut self) -> CursorMut<'_, T> {
+        CursorMut {
+            index: self.indexer_front(),
+            list: self,
+        }
+    }
+
+    pub fn cursor_mut_back(&mut self) -> CursorMut<'_, T> {
+        CursorMut {
+            index: self.indexer_back(),
+            list: self,
+        }
+    }
+
     pub fn indexer_front(&self) -> Option<Indexer<T>> {
         self.head.map(|head| Indexer(head))
     }
 
     pub fn indexer_back(&self) -> Option<Indexer<T>> {
         self.tail.map(|tail| Indexer(tail))
+    }
+
+    pub fn append(&mut self, other: &mut Self) {
+        let Some(mut other_head) = other.head else {
+            // otherが空なので何もしない
+            return;
+        };
+        debug_assert!(other.tail.is_some());
+
+        if let Some(tail) = &mut self.tail {
+            // いずれも空でない
+            let new_tail = unsafe { other.tail.unwrap_unchecked() };
+            unsafe {
+                tail.as_mut().next = Some(other_head);
+                other_head.as_mut().prev = Some(*tail);
+            }
+            *tail = new_tail;
+        } else {
+            // selfが空
+            self.head = Some(other_head);
+            self.tail = other.tail;
+        }
+        other.head = None;
+        other.tail = None;
     }
 }
 
@@ -341,6 +379,46 @@ impl<T: ?Sized> Default for LinkedList<T> {
     }
 }
 
+impl<T: PartialEq> PartialEq for LinkedList<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.iter().eq(other.iter())
+    }
+
+    fn ne(&self, other: &Self) -> bool {
+        self.iter().ne(other.iter())
+    }
+}
+
+impl<T: Eq> Eq for LinkedList<T> {}
+
+impl<T: PartialOrd> PartialOrd for LinkedList<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        self.iter().partial_cmp(other.iter())
+    }
+
+    fn ge(&self, other: &Self) -> bool {
+        self.iter().ge(other.iter())
+    }
+
+    fn gt(&self, other: &Self) -> bool {
+        self.iter().gt(other.iter())
+    }
+
+    fn le(&self, other: &Self) -> bool {
+        self.iter().le(other.iter())
+    }
+
+    fn lt(&self, other: &Self) -> bool {
+        self.iter().lt(other.iter())
+    }
+}
+
+impl<T: Ord> Ord for LinkedList<T> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.iter().cmp(other.iter())
+    }
+}
+
 pub struct Indexer<T: ?Sized>(NonNull<Node<T>>);
 
 impl<T: ?Sized> Clone for Indexer<T> {
@@ -461,16 +539,22 @@ pub struct CursorMut<'a, T: ?Sized> {
 
 impl<'a, T: ?Sized> CursorMut<'a, T> {
     /// カーソルを一つ次のノードに移動する。一つ次のノードが存在しない場合はダミーノードを指すように変更される。
+    /// ダミーノードを指している場合はリストの先頭に移動する。
     pub fn move_next(&mut self) {
         if let Some(index) = self.index {
             self.index = unsafe { index.next() };
+        } else {
+            self.index = self.list.indexer_front();
         }
     }
 
     /// カーソルを一つ前のノードに移動する。一つ前のノードが存在しない場合はダミーノードを指すように変更される。
+    /// ダミーノードを指している場合はリストの末尾に移動する。
     pub fn move_prev(&mut self) {
         if let Some(index) = self.index {
             self.index = unsafe { index.prev() };
+        } else {
+            self.index = self.list.indexer_back();
         }
     }
 
@@ -508,6 +592,12 @@ impl<'a, T: ?Sized> CursorMut<'a, T> {
             self.index = index.next();
             self.list.cut_node(index)
         })
+    }
+
+    /// # Safety
+    /// * `indexer`が指すノードとカーソルが指すノードが同じリストに属する。カーソルがダミーノードを指している場合もこれを満たす必要がある。
+    pub unsafe fn set_index(&mut self, indexer: Indexer<T>) {
+        self.index = Some(indexer);
     }
 }
 
@@ -575,5 +665,41 @@ mod tests {
         }
         println!("{list:?}");
         println!("{:?}", [1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn append_test() {
+        let mut list = (1i32..=10).collect::<LinkedList<_>>();
+        let mut list2 = (11i32..=20).collect::<LinkedList<_>>();
+        list.append(&mut list2);
+        assert!(list.into_iter().eq(1..=20));
+    }
+
+    #[test]
+    fn cursor_test() {
+        let mut list = [2, 4, 5, 6, 8].into_iter().collect::<LinkedList<_>>();
+        let mut cursor = list.cursor_mut_front();
+        assert!(!cursor.is_dummy());
+        cursor.move_next();
+        assert!(!cursor.is_dummy());
+        assert_eq!(*cursor.get().unwrap(), 4);
+        cursor.move_next();
+        assert_eq!(*cursor.get().unwrap(), 5);
+        assert_eq!(cursor.cut_current().unwrap(), 5);
+        assert_eq!(*cursor.get().unwrap(), 6);
+        cursor.move_next();
+        assert_eq!(*cursor.get().unwrap(), 8);
+        cursor.move_next();
+        assert!(cursor.is_dummy());
+        assert!(cursor.get().is_none());
+        cursor.move_next();
+        assert!(!cursor.is_dummy());
+        assert_eq!(*cursor.get().unwrap(), 2);
+        for _ in 0..4 {
+            cursor.remove_current();
+        }
+        assert!(cursor.is_dummy());
+        cursor.move_next();
+        assert!(cursor.is_dummy());
     }
 }
