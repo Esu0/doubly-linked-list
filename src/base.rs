@@ -23,6 +23,21 @@ pub(crate) struct Node<T: ?Sized> {
     value: T,
 }
 
+impl<T> Node<T> {
+    pub(crate) fn into_value(self) -> T {
+        self.value
+    }
+}
+
+impl<T: ?Sized> Node<T> {
+    pub(crate) fn value(&self) -> &T {
+        &self.value
+    }
+
+    pub(crate) fn value_mut(&mut self) -> &mut T {
+        &mut self.value
+    }
+}
 impl<T> LinkedList<T> {
     fn new_node_ptr(node: Node<T>) -> NonNull<Node<T>> {
         Box::leak(Box::new(node)).into()
@@ -114,7 +129,7 @@ impl<T: ?Sized> LinkedList<T> {
         self.head.is_none()
     }
 
-    pub(crate) unsafe fn iter_ptr(&self) -> IterPtr<T> {
+    pub(crate) fn iter_ptr(&self) -> IterPtr<T> {
         IterPtr {
             head: self.head,
             tail: self.tail,
@@ -123,14 +138,14 @@ impl<T: ?Sized> LinkedList<T> {
 
     pub fn iter(&self) -> Iter<'_, T> {
         Iter {
-            iter_ptr: unsafe { self.iter_ptr() },
+            iter_ptr: self.iter_ptr(),
             _marker: PhantomData,
         }
     }
 
     pub fn iter_mut(&mut self) -> IterMut<'_, T> {
         IterMut {
-            iter_ptr: unsafe { self.iter_ptr() },
+            iter_ptr: self.iter_ptr(),
             _marker: PhantomData,
         }
     }
@@ -152,35 +167,35 @@ impl<T: ?Sized> LinkedList<T> {
     }
 
     pub fn cursor_front(&self) -> Option<Cursor<'_, T>> {
-        self.indexer_front()
-            .map(|indexer| Cursor(indexer, PhantomData))
+        self.pointer_front()
+            .map(|pointer| Cursor(pointer, PhantomData))
     }
 
     pub fn cursor_back(&self) -> Option<Cursor<'_, T>> {
-        self.indexer_back()
-            .map(|indexer| Cursor(indexer, PhantomData))
+        self.pointer_back()
+            .map(|pointer| Cursor(pointer, PhantomData))
     }
 
     pub fn cursor_front_mut(&mut self) -> CursorMut<'_, T> {
         CursorMut {
-            indexer: self.indexer_front(),
+            pointer: self.pointer_front(),
             list: self,
         }
     }
 
     pub fn cursor_back_mut(&mut self) -> CursorMut<'_, T> {
         CursorMut {
-            indexer: self.indexer_back(),
+            pointer: self.pointer_back(),
             list: self,
         }
     }
 
-    pub fn indexer_front(&self) -> Option<Indexer<T>> {
-        self.head.map(|head| Indexer(head))
+    pub fn pointer_front(&self) -> Option<Pointer<T>> {
+        self.head.map(|head| Pointer(head))
     }
 
-    pub fn indexer_back(&self) -> Option<Indexer<T>> {
-        self.tail.map(|tail| Indexer(tail))
+    pub fn pointer_back(&self) -> Option<Pointer<T>> {
+        self.tail.map(|tail| Pointer(tail))
     }
 
     pub fn append(&mut self, other: &mut Self) {
@@ -234,7 +249,8 @@ impl<T> IntoIterator for LinkedList<T> {
     fn into_iter(self) -> Self::IntoIter {
         let slf = ManuallyDrop::new(self);
         IntoIter {
-            iter_ptr: unsafe { slf.iter_ptr() },
+            iter_ptr: slf.iter_ptr(),
+            _marker: PhantomData,
         }
     }
 }
@@ -259,8 +275,17 @@ impl<'a, T: ?Sized> IntoIterator for &'a mut LinkedList<T> {
 
 pub struct IntoIter<T> {
     iter_ptr: IterPtr<T>,
+    _marker: PhantomData<LinkedList<T>>,
 }
 
+impl<T> IntoIter<T> {
+    pub(crate) const unsafe fn from_iter_ptr(iter_ptr: IterPtr<T>) -> Self {
+        Self {
+            iter_ptr,
+            _marker: PhantomData,
+        }
+    }
+}
 impl<T> Iterator for IntoIter<T> {
     type Item = T;
 
@@ -278,6 +303,13 @@ impl<T> DoubleEndedIterator for IntoIter<T> {
             .map(|ptr| unsafe { Box::from_raw(ptr.as_ptr()).value })
     }
 }
+
+impl<T> Drop for IntoIter<T> {
+    fn drop(&mut self) {
+        self.for_each(|val| drop(val))
+    }
+}
+
 pub struct Iter<'a, T: ?Sized> {
     iter_ptr: IterPtr<T>,
     _marker: PhantomData<&'a LinkedList<T>>,
@@ -329,9 +361,19 @@ pub(crate) struct IterPtr<T: ?Sized> {
     tail: Link<T>,
 }
 
+impl<T: ?Sized> Clone for IterPtr<T> {
+    fn clone(&self) -> Self {
+        Self {
+            head: self.head,
+            tail: self.tail,
+        }
+    }
+}
+
 impl<T: ?Sized> Iterator for IterPtr<T> {
     type Item = NonNull<Node<T>>;
 
+    /// don't panic
     fn next(&mut self) -> Option<Self::Item> {
         self.head.map(|head| {
             if self.head == self.tail {
@@ -342,6 +384,13 @@ impl<T: ?Sized> Iterator for IterPtr<T> {
             }
             head
         })
+    }
+
+    fn last(self) -> Option<Self::Item>
+    where
+        Self: Sized,
+    {
+        self.tail
     }
 }
 
@@ -428,17 +477,17 @@ impl<T: Ord> Ord for LinkedList<T> {
     }
 }
 
-pub struct Indexer<T: ?Sized>(NonNull<Node<T>>);
+pub struct Pointer<T: ?Sized>(NonNull<Node<T>>);
 
-impl<T: ?Sized> Clone for Indexer<T> {
+impl<T: ?Sized> Clone for Pointer<T> {
     fn clone(&self) -> Self {
         Self(self.0)
     }
 }
 
-impl<T: ?Sized> Copy for Indexer<T> {}
+impl<T: ?Sized> Copy for Pointer<T> {}
 
-impl<T: ?Sized> Indexer<T> {
+impl<T: ?Sized> Pointer<T> {
     unsafe fn into_boxed_node(self) -> Box<Node<T>> {
         Box::from_raw(self.0.as_ptr())
     }
@@ -466,14 +515,14 @@ impl<T: ?Sized> Indexer<T> {
 
 impl<T: ?Sized> LinkedList<T> {
     /// # Safety
-    /// * `index`の指すノードがリスト`self`が所有する有効なノードである
-    pub unsafe fn remove(&mut self, index: Indexer<T>) {
-        drop(self.cut_node(index));
+    /// * `pointer`の指すノードがリスト`self`が所有する有効なノードである
+    pub unsafe fn remove(&mut self, pointer: Pointer<T>) {
+        drop(self.cut_node(pointer));
     }
 
-    unsafe fn cut_node(&mut self, index: Indexer<T>) -> Box<Node<T>> {
+    unsafe fn cut_node(&mut self, pointer: Pointer<T>) -> Box<Node<T>> {
         let (prev, next) = {
-            let node = index.0.as_ref();
+            let node = pointer.0.as_ref();
             (node.prev, node.next)
         };
 
@@ -489,29 +538,29 @@ impl<T: ?Sized> LinkedList<T> {
             self.tail = prev;
         }
 
-        index.into_boxed_node()
+        pointer.into_boxed_node()
     }
 
     /// # Safety
-    /// * `index`の指すノードがリスト`self`が所有する有効なノードである
-    pub unsafe fn get(&self, index: Indexer<T>) -> &T {
-        &(*index.0.as_ptr()).value
+    /// * `pointer`の指すノードがリスト`self`が所有する有効なノードである
+    pub unsafe fn get(&self, pointer: Pointer<T>) -> &T {
+        &(*pointer.0.as_ptr()).value
     }
 
     /// # Safety
-    /// * `index`の指すノードがリスト`self`が所有する有効なノードである
-    pub unsafe fn get_mut(&mut self, index: Indexer<T>) -> &mut T {
-        &mut (*index.0.as_ptr()).value
+    /// * `pointer`の指すノードがリスト`self`が所有する有効なノードである
+    pub unsafe fn get_mut(&mut self, pointer: Pointer<T>) -> &mut T {
+        &mut (*pointer.0.as_ptr()).value
     }
 
     /// # Safety
-    /// * `index`の指すノードがリスト`self`が所有する有効なノードである
-    pub unsafe fn get_cursor(&self, index: Indexer<T>) -> Cursor<'_, T> {
-        Cursor(index, PhantomData)
+    /// * `pointer`の指すノードがリスト`self`が所有する有効なノードである
+    pub unsafe fn get_cursor(&self, pointer: Pointer<T>) -> Cursor<'_, T> {
+        Cursor(pointer, PhantomData)
     }
 }
 
-pub struct Cursor<'a, T: ?Sized>(Indexer<T>, PhantomData<&'a LinkedList<T>>);
+pub struct Cursor<'a, T: ?Sized>(Pointer<T>, PhantomData<&'a LinkedList<T>>);
 
 impl<T: ?Sized> Clone for Cursor<'_, T> {
     fn clone(&self) -> Self {
@@ -542,7 +591,7 @@ impl<'a, T: ?Sized> Cursor<'a, T> {
 }
 
 pub struct CursorMut<'a, T: ?Sized> {
-    indexer: Option<Indexer<T>>,
+    pointer: Option<Pointer<T>>,
     list: &'a mut LinkedList<T>,
 }
 
@@ -550,20 +599,20 @@ impl<'a, T: ?Sized> CursorMut<'a, T> {
     /// カーソルを一つ次のノードに移動する。一つ次のノードが存在しない場合はダミーノードを指すように変更される。
     /// ダミーノードを指している場合はリストの先頭に移動する。
     pub fn move_next(&mut self) {
-        if let Some(index) = self.indexer {
-            self.indexer = unsafe { index.next() };
+        if let Some(pointer) = self.pointer {
+            self.pointer = unsafe { pointer.next() };
         } else {
-            self.indexer = self.list.indexer_front();
+            self.pointer = self.list.pointer_front();
         }
     }
 
     /// カーソルを一つ前のノードに移動する。一つ前のノードが存在しない場合はダミーノードを指すように変更される。
     /// ダミーノードを指している場合はリストの末尾に移動する。
     pub fn move_prev(&mut self) {
-        if let Some(index) = self.indexer {
-            self.indexer = unsafe { index.prev() };
+        if let Some(pointer) = self.pointer {
+            self.pointer = unsafe { pointer.prev() };
         } else {
-            self.indexer = self.list.indexer_back();
+            self.pointer = self.list.pointer_back();
         }
     }
 
@@ -585,28 +634,28 @@ impl<'a, T: ?Sized> CursorMut<'a, T> {
 
     /// ダミーノードを指している場合に`true`を返し、それ以外のときに`false`を返す
     pub const fn is_dummy(&self) -> bool {
-        self.indexer.is_none()
+        self.pointer.is_none()
     }
 
     fn node(&self) -> Option<&Node<T>> {
-        unsafe { self.indexer.map(|index| index.get()) }
+        unsafe { self.pointer.map(|pointer| pointer.get()) }
     }
 
     fn node_mut(&mut self) -> Option<&mut Node<T>> {
-        unsafe { self.indexer.map(|index| index.get_mut()) }
+        unsafe { self.pointer.map(|pointer| pointer.get_mut()) }
     }
 
     fn cut_node_current(&mut self) -> Option<Box<Node<T>>> {
-        self.indexer.map(|index| unsafe {
-            self.indexer = index.next();
-            self.list.cut_node(index)
+        self.pointer.map(|pointer| unsafe {
+            self.pointer = pointer.next();
+            self.list.cut_node(pointer)
         })
     }
 
     /// # Safety
-    /// * `indexer`が指すノードとカーソルが指すノードが同じリストに属する。カーソルがダミーノードを指している場合もこれを満たす必要がある。
-    pub unsafe fn set_index(&mut self, indexer: Indexer<T>) {
-        self.indexer = Some(indexer);
+    /// * `pointer`が指すノードとカーソルが指すノードが同じリストに属する。カーソルがダミーノードを指している場合もこれを満たす必要がある。
+    pub unsafe fn set_from_pointer(&mut self, pointer: Pointer<T>) {
+        self.pointer = Some(pointer);
     }
 
     pub fn list(&mut self) -> &mut LinkedList<T> {
@@ -622,12 +671,12 @@ impl<'a, T: ?Sized> CursorMut<'a, T> {
         mem::forget(list);
         unsafe {
             // `list`の末尾とリンクすべきノード
-            let next = if let Some(indexer) = self.indexer {
+            let next = if let Some(pointer) = self.pointer {
                 // ダミーノードを指していない => 先頭ノードの変更はなし
-                list_head.as_mut().prev = Some(indexer.0);
-                indexer.get_mut().next.replace(list_head)
+                list_head.as_mut().prev = Some(pointer.0);
+                pointer.get_mut().next.replace(list_head)
 
-                // `indexer.get_mut().next`が`None`のときは末尾に挿入することになる
+                // `pointer.get_mut().next`が`None`のときは末尾に挿入することになる
                 // よって、`list`の末尾とリンクすべきノードは存在しない
             } else {
                 debug_assert!(list_head.as_ref().prev.is_none());
@@ -657,9 +706,9 @@ impl<'a, T: ?Sized> CursorMut<'a, T> {
         };
         mem::forget(list);
         unsafe {
-            let prev = if let Some(indexer) = self.indexer {
-                list_tail.as_mut().next = Some(indexer.0);
-                indexer.get_mut().prev.replace(list_tail)
+            let prev = if let Some(pointer) = self.pointer {
+                list_tail.as_mut().next = Some(pointer.0);
+                pointer.get_mut().prev.replace(list_tail)
             } else {
                 debug_assert!(list_tail.as_ref().next.is_none());
                 self.list.tail.replace(list_tail)
@@ -677,10 +726,10 @@ impl<'a, T: ?Sized> CursorMut<'a, T> {
 
     pub fn split_after(&mut self) -> LinkedList<T> {
         unsafe {
-            if let Some(indexer) = self.indexer {
-                let head = indexer.get_mut().next.take();
+            if let Some(pointer) = self.pointer {
+                let head = pointer.get_mut().next.take();
                 if let Some(mut head) = head {
-                    let tail = self.list.tail.replace(indexer.0);
+                    let tail = self.list.tail.replace(pointer.0);
                     head.as_mut().prev = None;
                     LinkedList {
                         head: Some(head),
@@ -700,10 +749,10 @@ impl<'a, T: ?Sized> CursorMut<'a, T> {
 
     pub fn split_before(&mut self) -> LinkedList<T> {
         unsafe {
-            if let Some(indexer) = self.indexer {
-                let tail = indexer.get_mut().prev.take();
+            if let Some(pointer) = self.pointer {
+                let tail = pointer.get_mut().prev.take();
                 if let Some(mut tail) = tail {
-                    let head = self.list.head.replace(indexer.0);
+                    let head = self.list.head.replace(pointer.0);
                     tail.as_mut().next = None;
                     LinkedList {
                         head,
@@ -730,11 +779,11 @@ impl<'a, T> CursorMut<'a, T> {
     }
 
     pub fn insert_after(&mut self, value: T) {
-        if let Some(indexer) = self.indexer {
+        if let Some(pointer) = self.pointer {
             // ダミーノードでない = 挿入位置は先頭でない
-            let next = unsafe { &mut indexer.get_mut().next };
+            let next = unsafe { &mut pointer.get_mut().next };
             let new_node = LinkedList::new_node_ptr(Node {
-                prev: Some(indexer.0),
+                prev: Some(pointer.0),
                 next: *next,
                 value,
             });
@@ -754,11 +803,11 @@ impl<'a, T> CursorMut<'a, T> {
     }
 
     pub fn insert_before(&mut self, value: T) {
-        if let Some(indexer) = self.indexer {
-            let prev = unsafe { &mut indexer.get_mut().next };
+        if let Some(pointer) = self.pointer {
+            let prev = unsafe { &mut pointer.get_mut().next };
             let new_node = LinkedList::new_node_ptr(Node {
                 prev: *prev,
-                next: Some(indexer.0),
+                next: Some(pointer.0),
                 value,
             });
             if let Some(mut prev) = prev.replace(new_node) {
@@ -916,9 +965,9 @@ mod tests {
 
         cursor.splice_before([5, 6].into_iter().collect());
         assert!(cursor.list().iter().copied().eq(1..=6));
-        let tail_old = cursor.list().indexer_back().unwrap();
+        let tail_old = cursor.list().pointer_back().unwrap();
         cursor.list().append(&mut [9, 10, 11].into_iter().collect());
-        unsafe { cursor.set_index(tail_old) };
+        unsafe { cursor.set_from_pointer(tail_old) };
         cursor.splice_after([7, 8].into_iter().collect());
         assert!(cursor.list().iter().copied().eq(1..=11));
     }

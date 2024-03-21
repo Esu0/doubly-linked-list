@@ -1,71 +1,74 @@
-use crate::base::LinkedList;
+use crate::base::{LinkedList, Pointer};
 use std::{
     borrow::Borrow,
-    collections::{BTreeSet, HashSet},
+    collections::{BTreeMap, HashMap},
     hash::{BuildHasher, Hash},
 };
 
-pub struct OrderedSet<S, T> {
-    set: S,
+pub struct OrderedSet<M, T> {
+    set: M,
     list: LinkedList<T>,
 }
 
-impl<S, T> OrderedSet<S, T> {
+impl<M, T> OrderedSet<M, T> {
     pub fn new() -> Self
     where
-        S: Default,
+        M: Default,
     {
         Self {
-            set: S::default(),
+            set: M::default(),
             list: LinkedList::new(),
         }
     }
 
     pub fn insert_next<Q: ?Sized>(&mut self, key: &Q, value: T) -> bool
     where
-        S: Set<Q, Item = T>,
+        M: Map<Q, Key = T, Item = Pointer<T>>,
     {
         todo!()
     }
 }
-pub trait Set<Q: ?Sized> {
+pub trait Map<Q: ?Sized> {
+    type Key;
     type Item;
 
-    fn get(&self, key: &Q) -> Option<&Self::Item>;
-    fn take(&mut self, key: &Q) -> Option<Self::Item>;
-    fn replace(&mut self, key: Self::Item) -> Option<Self::Item>;
+    fn get_key_value(&self, key: &Q) -> Option<(&Self::Key, &Self::Item)>;
+    fn remove_entry(&mut self, key: &Q) -> Option<(Self::Key, Self::Item)>;
+    fn insert(&mut self, key: Self::Key, value: Self::Item) -> Option<Self::Item>;
 }
 
-impl<I: Eq + Hash + Borrow<Q>, Q: Eq + Hash + ?Sized, S: BuildHasher + Default> Set<Q>
-    for HashSet<I, S>
+impl<K: Eq + Hash + Borrow<Q>, Q: Eq + Hash + ?Sized, V, S: BuildHasher + Default> Map<Q>
+    for HashMap<K, V, S>
 {
-    type Item = I;
+    type Key = K;
+    type Item = V;
 
-    fn get(&self, key: &Q) -> Option<&Self::Item> {
-        HashSet::get(self, key)
+    fn get_key_value(&self, key: &Q) -> Option<(&Self::Key, &Self::Item)> {
+        HashMap::get_key_value(self, key)
     }
 
-    fn take(&mut self, key: &Q) -> Option<Self::Item> {
-        HashSet::take(self, key)
+    fn insert(&mut self, key: Self::Key, value: Self::Item) -> Option<Self::Item> {
+        HashMap::insert(self, key, value)
     }
 
-    fn replace(&mut self, key: Self::Item) -> Option<Self::Item> {
-        HashSet::replace(self, key)
+    fn remove_entry(&mut self, key: &Q) -> Option<(Self::Key, Self::Item)> {
+        HashMap::remove_entry(self, key)
     }
 }
 
-impl<I: Ord + Borrow<Q>, Q: Ord + ?Sized> Set<Q> for BTreeSet<I> {
-    type Item = I;
+impl<K: Ord + Borrow<Q>, V, Q: Ord + ?Sized> Map<Q> for BTreeMap<K, V> {
+    type Key = K;
+    type Item = V;
 
-    fn get(&self, key: &Q) -> Option<&Self::Item> {
-        BTreeSet::get(self, key)
+    fn get_key_value(&self, key: &Q) -> Option<(&Self::Key, &Self::Item)> {
+        BTreeMap::get_key_value(self, key)
     }
 
-    fn take(&mut self, key: &Q) -> Option<Self::Item> {
-        BTreeSet::take(self, key)
+    fn insert(&mut self, key: Self::Key, value: Self::Item) -> Option<Self::Item> {
+        BTreeMap::insert(self, key, value)
     }
 
-    fn replace(&mut self, key: Self::Item) -> Option<Self::Item> {
-        BTreeSet::replace(self, key)
+    fn remove_entry(&mut self, key: &Q) -> Option<(Self::Key, Self::Item)> {
+        BTreeMap::remove_entry(self, key)
     }
 }
