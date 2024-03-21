@@ -163,14 +163,14 @@ impl<T: ?Sized> LinkedList<T> {
 
     pub fn cursor_front_mut(&mut self) -> CursorMut<'_, T> {
         CursorMut {
-            index: self.indexer_front(),
+            indexer: self.indexer_front(),
             list: self,
         }
     }
 
     pub fn cursor_back_mut(&mut self) -> CursorMut<'_, T> {
         CursorMut {
-            index: self.indexer_back(),
+            indexer: self.indexer_back(),
             list: self,
         }
     }
@@ -205,6 +205,11 @@ impl<T: ?Sized> LinkedList<T> {
         }
         other.head = None;
         other.tail = None;
+    }
+
+    fn get_head_tail(&self) -> Option<(NonNull<Node<T>>, NonNull<Node<T>>)> {
+        self.head
+            .map(|head| (head, unsafe { self.tail.unwrap_unchecked() }))
     }
 }
 
@@ -533,7 +538,7 @@ impl<'a, T: ?Sized> Cursor<'a, T> {
 }
 
 pub struct CursorMut<'a, T: ?Sized> {
-    index: Option<Indexer<T>>,
+    indexer: Option<Indexer<T>>,
     list: &'a mut LinkedList<T>,
 }
 
@@ -541,20 +546,20 @@ impl<'a, T: ?Sized> CursorMut<'a, T> {
     /// カーソルを一つ次のノードに移動する。一つ次のノードが存在しない場合はダミーノードを指すように変更される。
     /// ダミーノードを指している場合はリストの先頭に移動する。
     pub fn move_next(&mut self) {
-        if let Some(index) = self.index {
-            self.index = unsafe { index.next() };
+        if let Some(index) = self.indexer {
+            self.indexer = unsafe { index.next() };
         } else {
-            self.index = self.list.indexer_front();
+            self.indexer = self.list.indexer_front();
         }
     }
 
     /// カーソルを一つ前のノードに移動する。一つ前のノードが存在しない場合はダミーノードを指すように変更される。
     /// ダミーノードを指している場合はリストの末尾に移動する。
     pub fn move_prev(&mut self) {
-        if let Some(index) = self.index {
-            self.index = unsafe { index.prev() };
+        if let Some(index) = self.indexer {
+            self.indexer = unsafe { index.prev() };
         } else {
-            self.index = self.list.indexer_back();
+            self.indexer = self.list.indexer_back();
         }
     }
 
@@ -576,20 +581,20 @@ impl<'a, T: ?Sized> CursorMut<'a, T> {
 
     /// ダミーノードを指している場合に`true`を返し、それ以外のときに`false`を返す
     pub const fn is_dummy(&self) -> bool {
-        self.index.is_none()
+        self.indexer.is_none()
     }
 
     fn node(&self) -> Option<&Node<T>> {
-        unsafe { self.index.map(|index| index.get()) }
+        unsafe { self.indexer.map(|index| index.get()) }
     }
 
     fn node_mut(&mut self) -> Option<&mut Node<T>> {
-        unsafe { self.index.map(|index| index.get_mut()) }
+        unsafe { self.indexer.map(|index| index.get_mut()) }
     }
 
     fn cut_node_current(&mut self) -> Option<Box<Node<T>>> {
-        self.index.map(|index| unsafe {
-            self.index = index.next();
+        self.indexer.map(|index| unsafe {
+            self.indexer = index.next();
             self.list.cut_node(index)
         })
     }
@@ -597,7 +602,33 @@ impl<'a, T: ?Sized> CursorMut<'a, T> {
     /// # Safety
     /// * `indexer`が指すノードとカーソルが指すノードが同じリストに属する。カーソルがダミーノードを指している場合もこれを満たす必要がある。
     pub unsafe fn set_index(&mut self, indexer: Indexer<T>) {
-        self.index = Some(indexer);
+        self.indexer = Some(indexer);
+    }
+
+    pub fn list(&mut self) -> &mut LinkedList<T> {
+        self.list
+    }
+
+    pub fn splice_next(&mut self, list: LinkedList<T>) {
+        let Some((mut list_head, mut list_tail)) = list.get_head_tail() else {
+            return;
+        };
+        std::mem::forget(list);
+        unsafe {
+            let next = if let Some(indexer) = self.indexer {
+                indexer.get_mut().next.replace(list_head)
+            } else {
+                self.list.head.replace(list_head)
+            };
+            list_head.as_mut().prev = self.indexer.map(|indexer| indexer.0);
+
+            if let Some(mut next) = next {
+                next.as_mut().prev = Some(list_tail);
+            } else {
+                self.list.tail = Some(list_tail);
+            }
+            list_tail.as_mut().next = next;
+        }
     }
 }
 
@@ -606,6 +637,50 @@ impl<'a, T> CursorMut<'a, T> {
     /// 現在指しているノードがダミーノードなら何もしない。
     pub fn cut_current(&mut self) -> Option<T> {
         self.cut_node_current().map(|node| node.value)
+    }
+
+    pub fn insert_after(&mut self, value: T) {
+        if let Some(indexer) = self.indexer {
+            // ダミーノードでない = 挿入位置は先頭でない
+            let next = unsafe { &mut indexer.get_mut().next };
+            let new_node = LinkedList::new_node_ptr(Node {
+                prev: Some(indexer.0),
+                next: *next,
+                value,
+            });
+            if let Some(mut next) = next.replace(new_node) {
+                // 次のノードが存在する
+                unsafe {
+                    next.as_mut().prev = Some(new_node);
+                }
+            } else {
+                // 次のノードが存在しない = 現在位置は末尾
+                self.list.tail = Some(new_node);
+            }
+        } else {
+            // ダミーノードを指しているので先頭に挿入
+            self.list.push_front(value);
+        }
+    }
+
+    pub fn insert_before(&mut self, value: T) {
+        if let Some(indexer) = self.indexer {
+            let prev = unsafe { &mut indexer.get_mut().next };
+            let new_node = LinkedList::new_node_ptr(Node {
+                prev: *prev,
+                next: Some(indexer.0),
+                value,
+            });
+            if let Some(mut prev) = prev.replace(new_node) {
+                unsafe {
+                    prev.as_mut().next = Some(new_node);
+                }
+            } else {
+                self.list.head = Some(new_node);
+            }
+        } else {
+            self.list.push_back(value);
+        }
     }
 }
 
@@ -701,5 +776,13 @@ mod tests {
         assert!(cursor.is_dummy());
         cursor.move_next();
         assert!(cursor.is_dummy());
+
+        cursor.insert_after(30);
+        cursor.insert_after(25);
+        cursor.move_next();
+        cursor.insert_after(28);
+        cursor.move_next();
+        cursor.insert_after(29);
+        assert!(cursor.list().iter().eq(&[25, 28, 29, 30]));
     }
 }
