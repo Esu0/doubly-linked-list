@@ -520,7 +520,7 @@ impl<T: ?Sized> LinkedList<T> {
         drop(self.cut_node(pointer));
     }
 
-    unsafe fn cut_node(&mut self, pointer: Pointer<T>) -> Box<Node<T>> {
+    pub(crate) unsafe fn cut_node(&mut self, pointer: Pointer<T>) -> Box<Node<T>> {
         let (prev, next) = {
             let node = pointer.0.as_ref();
             (node.prev, node.next)
@@ -557,6 +557,181 @@ impl<T: ?Sized> LinkedList<T> {
     /// * `pointer`の指すノードがリスト`self`が所有する有効なノードである
     pub unsafe fn get_cursor(&self, pointer: Pointer<T>) -> Cursor<'_, T> {
         Cursor(pointer, PhantomData)
+    }
+
+    /// # Safety
+    /// * `pointer`の指すノードがリスト`self`が所有する有効なノードである
+    pub unsafe fn get_cursor_mut(&mut self, pointer: Pointer<T>) -> CursorMut<'_, T> {
+        CursorMut {
+            pointer: Some(pointer),
+            list: self,
+        }
+    }
+
+    pub unsafe fn next_pointer(&self, pointer: Option<Pointer<T>>) -> Option<Pointer<T>> {
+        if let Some(pointer) = pointer {
+            pointer.next()
+        } else {
+            self.pointer_front()
+        }
+    }
+
+    pub unsafe fn prev_pointer(&self, pointer: Option<Pointer<T>>) -> Option<Pointer<T>> {
+        if let Some(pointer) = pointer {
+            pointer.prev()
+        } else {
+            self.pointer_back()
+        }
+    }
+
+    pub unsafe fn splice_after_with_pointer(&mut self, pointer: Option<Pointer<T>>, list: Self) {
+        let Some((mut list_head, mut list_tail)) = list.get_head_tail() else {
+            // リストは空なので何もしない
+            return;
+        };
+        // `LinkedList::drop()`を呼ばないようにする
+        mem::forget(list);
+
+        // `list`の末尾とリンクすべきノード
+        let next = if let Some(pointer) = pointer {
+            // ダミーノードを指していない => 先頭ノードの変更はなし
+            list_head.as_mut().prev = Some(pointer.0);
+            pointer.get_mut().next.replace(list_head)
+
+            // `pointer.get_mut().next`が`None`のときは末尾に挿入することになる
+            // よって、`list`の末尾とリンクすべきノードは存在しない
+        } else {
+            debug_assert!(list_head.as_ref().prev.is_none());
+            // ダミーノードを指している => 先頭ノードを変更
+            // `(*list_head).prev`は`None`であることが保証されているため
+            // 変更しなくてよい
+            self.head.replace(list_head)
+
+            // `self.list.head`が`None`のときはリストが空であるから、
+            // `list`の末尾とリンクすべきノードは存在しない
+        };
+
+        if let Some(mut next) = next {
+            next.as_mut().prev = Some(list_tail);
+            list_tail.as_mut().next = Some(next);
+        } else {
+            debug_assert!(list_tail.as_ref().next.is_none());
+            // `next`が`None`のときは末尾ノードを変更する必要がある
+            self.tail = Some(list_tail);
+        }
+    }
+
+    pub unsafe fn splice_before_with_pointer(&mut self, pointer: Option<Pointer<T>>, list: Self) {
+        let Some((mut list_head, mut list_tail)) = list.get_head_tail() else {
+            return;
+        };
+        mem::forget(list);
+        unsafe {
+            let prev = if let Some(pointer) = pointer {
+                list_tail.as_mut().next = Some(pointer.0);
+                pointer.get_mut().prev.replace(list_tail)
+            } else {
+                debug_assert!(list_tail.as_ref().next.is_none());
+                self.tail.replace(list_tail)
+            };
+
+            if let Some(mut prev) = prev {
+                prev.as_mut().next = Some(list_head);
+                list_head.as_mut().prev = Some(prev);
+            } else {
+                debug_assert!(list_head.as_ref().prev.is_none());
+                self.head = Some(list_head);
+            }
+        }
+    }
+
+    pub unsafe fn split_after_with_pointer(&mut self, pointer: Option<Pointer<T>>) -> Self {
+        if let Some(pointer) = pointer {
+            let head = pointer.get_mut().next.take();
+            if let Some(mut head) = head {
+                let tail = self.tail.replace(pointer.0);
+                head.as_mut().prev = None;
+                LinkedList {
+                    head: Some(head),
+                    tail,
+                }
+            } else {
+                LinkedList::new()
+            }
+        } else {
+            LinkedList {
+                head: self.head.take(),
+                tail: self.tail.take(),
+            }
+        }
+    }
+
+    pub unsafe fn split_before_with_pointer(&mut self, pointer: Option<Pointer<T>>) -> Self {
+        if let Some(pointer) = pointer {
+            let tail = pointer.get_mut().prev.take();
+            if let Some(mut tail) = tail {
+                let head = self.head.replace(pointer.0);
+                tail.as_mut().next = None;
+                LinkedList {
+                    head,
+                    tail: Some(tail),
+                }
+            } else {
+                LinkedList::new()
+            }
+        } else {
+            LinkedList {
+                head: self.head.take(),
+                tail: self.tail.take(),
+            }
+        }
+    }
+
+}
+
+impl<T> LinkedList<T> {
+    pub unsafe fn insert_after_pointer(&mut self, pointer: Option<Pointer<T>>, value: T) {
+        if let Some(pointer) = pointer {
+            // ダミーノードでない = 挿入位置は先頭でない
+            let next = unsafe { &mut pointer.get_mut().next };
+            let new_node = LinkedList::new_node_ptr(Node {
+                prev: Some(pointer.0),
+                next: *next,
+                value,
+            });
+            if let Some(mut next) = next.replace(new_node) {
+                // 次のノードが存在する
+                unsafe {
+                    next.as_mut().prev = Some(new_node);
+                }
+            } else {
+                // 次のノードが存在しない = 現在位置は末尾
+                self.tail = Some(new_node);
+            }
+        } else {
+            // ダミーノードを指しているので先頭に挿入
+            self.push_front(value);
+        }
+    }
+
+    pub unsafe fn insert_before_pointer(&mut self, pointer: Option<Pointer<T>>, value: T) {
+        if let Some(pointer) = pointer {
+            let prev = unsafe { &mut pointer.get_mut().next };
+            let new_node = LinkedList::new_node_ptr(Node {
+                prev: *prev,
+                next: Some(pointer.0),
+                value,
+            });
+            if let Some(mut prev) = prev.replace(new_node) {
+                unsafe {
+                    prev.as_mut().next = Some(new_node);
+                }
+            } else {
+                self.head = Some(new_node);
+            }
+        } else {
+            self.push_back(value);
+        }
     }
 }
 
@@ -599,21 +774,13 @@ impl<'a, T: ?Sized> CursorMut<'a, T> {
     /// カーソルを一つ次のノードに移動する。一つ次のノードが存在しない場合はダミーノードを指すように変更される。
     /// ダミーノードを指している場合はリストの先頭に移動する。
     pub fn move_next(&mut self) {
-        if let Some(pointer) = self.pointer {
-            self.pointer = unsafe { pointer.next() };
-        } else {
-            self.pointer = self.list.pointer_front();
-        }
+        self.pointer = unsafe { self.list.next_pointer(self.pointer) };
     }
 
     /// カーソルを一つ前のノードに移動する。一つ前のノードが存在しない場合はダミーノードを指すように変更される。
     /// ダミーノードを指している場合はリストの末尾に移動する。
     pub fn move_prev(&mut self) {
-        if let Some(pointer) = self.pointer {
-            self.pointer = unsafe { pointer.prev() };
-        } else {
-            self.pointer = self.list.pointer_back();
-        }
+        self.pointer = unsafe { self.list.prev_pointer(self.pointer) };
     }
 
     /// 現在指しているノードをリストから削除する。このとき、カーソルを次のノードに移動する。
@@ -663,111 +830,23 @@ impl<'a, T: ?Sized> CursorMut<'a, T> {
     }
 
     pub fn splice_after(&mut self, list: LinkedList<T>) {
-        let Some((mut list_head, mut list_tail)) = list.get_head_tail() else {
-            // リストは空なので何もしない
-            return;
-        };
-        // `LinkedList::drop()`を呼ばないようにする
-        mem::forget(list);
         unsafe {
-            // `list`の末尾とリンクすべきノード
-            let next = if let Some(pointer) = self.pointer {
-                // ダミーノードを指していない => 先頭ノードの変更はなし
-                list_head.as_mut().prev = Some(pointer.0);
-                pointer.get_mut().next.replace(list_head)
-
-                // `pointer.get_mut().next`が`None`のときは末尾に挿入することになる
-                // よって、`list`の末尾とリンクすべきノードは存在しない
-            } else {
-                debug_assert!(list_head.as_ref().prev.is_none());
-                // ダミーノードを指している => 先頭ノードを変更
-                // `(*list_head).prev`は`None`であることが保証されているため
-                // 変更しなくてよい
-                self.list.head.replace(list_head)
-
-                // `self.list.head`が`None`のときはリストが空であるから、
-                //　`list`の末尾とリンクすべきノードは存在しない
-            };
-
-            if let Some(mut next) = next {
-                next.as_mut().prev = Some(list_tail);
-                list_tail.as_mut().next = Some(next);
-            } else {
-                debug_assert!(list_tail.as_ref().next.is_none());
-                // `next`が`None`のときは末尾ノードを変更する必要がある
-                self.list.tail = Some(list_tail);
-            }
+            self.list.splice_after_with_pointer(self.pointer, list);
         }
     }
 
     pub fn splice_before(&mut self, list: LinkedList<T>) {
-        let Some((mut list_head, mut list_tail)) = list.get_head_tail() else {
-            return;
-        };
-        mem::forget(list);
         unsafe {
-            let prev = if let Some(pointer) = self.pointer {
-                list_tail.as_mut().next = Some(pointer.0);
-                pointer.get_mut().prev.replace(list_tail)
-            } else {
-                debug_assert!(list_tail.as_ref().next.is_none());
-                self.list.tail.replace(list_tail)
-            };
-
-            if let Some(mut prev) = prev {
-                prev.as_mut().next = Some(list_head);
-                list_head.as_mut().prev = Some(prev);
-            } else {
-                debug_assert!(list_head.as_ref().prev.is_none());
-                self.list.head = Some(list_head);
-            }
+            self.list.splice_before_with_pointer(self.pointer, list);
         }
     }
 
     pub fn split_after(&mut self) -> LinkedList<T> {
-        unsafe {
-            if let Some(pointer) = self.pointer {
-                let head = pointer.get_mut().next.take();
-                if let Some(mut head) = head {
-                    let tail = self.list.tail.replace(pointer.0);
-                    head.as_mut().prev = None;
-                    LinkedList {
-                        head: Some(head),
-                        tail,
-                    }
-                } else {
-                    LinkedList::new()
-                }
-            } else {
-                LinkedList {
-                    head: self.list.head.take(),
-                    tail: self.list.tail.take(),
-                }
-            }
-        }
+        unsafe { self.list.split_after_with_pointer(self.pointer) }
     }
 
     pub fn split_before(&mut self) -> LinkedList<T> {
-        unsafe {
-            if let Some(pointer) = self.pointer {
-                let tail = pointer.get_mut().prev.take();
-                if let Some(mut tail) = tail {
-                    let head = self.list.head.replace(pointer.0);
-                    tail.as_mut().next = None;
-                    LinkedList {
-                        head,
-                        tail: Some(tail),
-                    }
-                } else {
-                    LinkedList::new()
-                }
-            } else {
-                LinkedList {
-                    head: self.list.head.take(),
-                    tail: self.list.tail.take(),
-                }
-            }
-        }
+        unsafe { self.list.split_before_with_pointer(self.pointer) }
     }
 }
 
@@ -779,46 +858,14 @@ impl<'a, T> CursorMut<'a, T> {
     }
 
     pub fn insert_after(&mut self, value: T) {
-        if let Some(pointer) = self.pointer {
-            // ダミーノードでない = 挿入位置は先頭でない
-            let next = unsafe { &mut pointer.get_mut().next };
-            let new_node = LinkedList::new_node_ptr(Node {
-                prev: Some(pointer.0),
-                next: *next,
-                value,
-            });
-            if let Some(mut next) = next.replace(new_node) {
-                // 次のノードが存在する
-                unsafe {
-                    next.as_mut().prev = Some(new_node);
-                }
-            } else {
-                // 次のノードが存在しない = 現在位置は末尾
-                self.list.tail = Some(new_node);
-            }
-        } else {
-            // ダミーノードを指しているので先頭に挿入
-            self.list.push_front(value);
+        unsafe {
+            self.list.insert_after_pointer(self.pointer, value);
         }
     }
 
     pub fn insert_before(&mut self, value: T) {
-        if let Some(pointer) = self.pointer {
-            let prev = unsafe { &mut pointer.get_mut().next };
-            let new_node = LinkedList::new_node_ptr(Node {
-                prev: *prev,
-                next: Some(pointer.0),
-                value,
-            });
-            if let Some(mut prev) = prev.replace(new_node) {
-                unsafe {
-                    prev.as_mut().next = Some(new_node);
-                }
-            } else {
-                self.list.head = Some(new_node);
-            }
-        } else {
-            self.list.push_back(value);
+        unsafe {
+            self.list.insert_before_pointer(self.pointer, value);
         }
     }
 }
