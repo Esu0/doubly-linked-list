@@ -855,4 +855,6 @@ mod tests {
         let cursor = cursor.add_index();
         assert_eq!(index, cursor.index());
     }
+
+    // TODO: allocator tests
 }
