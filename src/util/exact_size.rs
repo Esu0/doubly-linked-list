@@ -1,4 +1,5 @@
 use std::{
+    alloc::{Allocator, Global},
     fmt::{self, Debug},
     marker::PhantomData,
     mem::{self, ManuallyDrop},
@@ -7,12 +8,12 @@ use std::{
 
 use crate::base::{self as base, IterPtr, Node};
 
-pub struct LinkedList<T: ?Sized> {
-    list: base::LinkedList<T>,
+pub struct LinkedList<T: ?Sized, A: Allocator + Clone = Global> {
+    list: base::LinkedList<T, A>,
     len: usize,
 }
 
-impl<T> LinkedList<T> {
+impl<T, A: Allocator + Clone> LinkedList<T, A> {
     pub fn push_front(&mut self, value: T) {
         self.len += 1;
         self.list.push_front(value);
@@ -34,10 +35,19 @@ impl<T> LinkedList<T> {
     }
 }
 
-impl<T: ?Sized> LinkedList<T> {
+impl<T: ?Sized> LinkedList<T, Global> {
     pub const fn new() -> Self {
         Self {
             list: base::LinkedList::new(),
+            len: 0,
+        }
+    }
+}
+
+impl<T: ?Sized, A: Allocator + Clone> LinkedList<T, A> {
+    pub const fn new_in(alloc: A) -> Self {
+        Self {
+            list: base::LinkedList::new_in(alloc),
             len: 0,
         }
     }
@@ -88,7 +98,7 @@ impl<T: ?Sized> LinkedList<T> {
         self.list.cursor_back()
     }
 
-    pub fn cursor_front_mut(&mut self) -> CursorMut<'_, T> {
+    pub fn cursor_front_mut(&mut self) -> CursorMut<'_, T, A> {
         CursorMut {
             cursor: CursorMutWithoutIndex {
                 pointer: self.pointer_front(),
@@ -98,7 +108,7 @@ impl<T: ?Sized> LinkedList<T> {
         }
     }
 
-    pub fn cursor_back_mut(&mut self) -> CursorMut<'_, T> {
+    pub fn cursor_back_mut(&mut self) -> CursorMut<'_, T, A> {
         CursorMut {
             index: self.len.checked_sub(1).unwrap_or(0),
             cursor: CursorMutWithoutIndex {
@@ -122,7 +132,7 @@ impl<T: ?Sized> LinkedList<T> {
     }
 
     pub fn clear(&mut self) {
-        *self = Self::new();
+        *self = Self::new_in(self.list.alloc().clone());
     }
 
     fn iter_ptr(&self) -> IterPtrWithLen<T> {
@@ -171,7 +181,7 @@ impl<T: ?Sized> ExactSizeIterator for IterPtrWithLen<T> {
     }
 }
 
-impl<I> FromIterator<I> for LinkedList<I> {
+impl<I> FromIterator<I> for LinkedList<I, Global> {
     fn from_iter<T: IntoIterator<Item = I>>(iter: T) -> Self {
         let mut list = Self::new();
         for item in iter {
@@ -181,20 +191,21 @@ impl<I> FromIterator<I> for LinkedList<I> {
     }
 }
 
-impl<T> IntoIterator for LinkedList<T> {
-    type IntoIter = IntoIter<T>;
+impl<T, A: Allocator + Clone> IntoIterator for LinkedList<T, A> {
+    type IntoIter = IntoIter<T, A>;
     type Item = T;
 
     fn into_iter(self) -> Self::IntoIter {
         let slf = ManuallyDrop::new(self);
         IntoIter {
             iter_ptr: slf.iter_ptr(),
+            alloc: slf.list.alloc().clone(),
             _marker: PhantomData,
         }
     }
 }
 
-impl<'a, T: ?Sized> IntoIterator for &'a LinkedList<T> {
+impl<'a, T: ?Sized, A: Allocator + Clone> IntoIterator for &'a LinkedList<T, A> {
     type IntoIter = Iter<'a, T>;
     type Item = &'a T;
 
@@ -203,7 +214,7 @@ impl<'a, T: ?Sized> IntoIterator for &'a LinkedList<T> {
     }
 }
 
-impl<'a, T: ?Sized> IntoIterator for &'a mut LinkedList<T> {
+impl<'a, T: ?Sized, A: Allocator + Clone> IntoIterator for &'a mut LinkedList<T, A> {
     type IntoIter = IterMut<'a, T>;
     type Item = &'a mut T;
 
@@ -212,18 +223,19 @@ impl<'a, T: ?Sized> IntoIterator for &'a mut LinkedList<T> {
     }
 }
 
-pub struct IntoIter<T> {
+pub struct IntoIter<T, A: Allocator + Clone> {
     iter_ptr: IterPtrWithLen<T>,
-    _marker: PhantomData<LinkedList<T>>,
+    alloc: A,
+    _marker: PhantomData<LinkedList<T, A>>,
 }
 
-impl<T> Iterator for IntoIter<T> {
+impl<T, A: Allocator + Clone> Iterator for IntoIter<T, A> {
     type Item = T;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.iter_ptr
             .next()
-            .map(|ptr| unsafe { Box::from_raw(ptr.as_ptr()).into_value() })
+            .map(|ptr| unsafe { Box::from_raw_in(ptr.as_ptr(), self.alloc.clone()).into_value() })
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -231,32 +243,35 @@ impl<T> Iterator for IntoIter<T> {
     }
 }
 
-impl<T> DoubleEndedIterator for IntoIter<T> {
+impl<T, A: Allocator + Clone> DoubleEndedIterator for IntoIter<T, A> {
     fn next_back(&mut self) -> Option<Self::Item> {
         self.iter_ptr
             .next_back()
-            .map(|ptr| unsafe { Box::from_raw(ptr.as_ptr()).into_value() })
+            .map(|ptr| unsafe { Box::from_raw_in(ptr.as_ptr(), self.alloc.clone()).into_value() })
     }
 }
 
-impl<T> ExactSizeIterator for IntoIter<T> {
+impl<T, A: Allocator + Clone> ExactSizeIterator for IntoIter<T, A> {
     fn len(&self) -> usize {
         self.iter_ptr.len()
     }
 }
 
-impl<T> Drop for IntoIter<T> {
+impl<T, A: Allocator + Clone> Drop for IntoIter<T, A> {
     fn drop(&mut self) {
         unsafe {
             // lenの変更を避けてdrop
-            drop(base::IntoIter::from_iter_ptr(self.iter_ptr.iter.clone()))
+            drop(base::IntoIter::from_iter_ptr(
+                self.iter_ptr.iter.clone(),
+                self.alloc.clone(),
+            ))
         }
     }
 }
 
 pub struct Iter<'a, T: ?Sized> {
     iter_ptr: IterPtrWithLen<T>,
-    _marker: PhantomData<&'a LinkedList<T>>,
+    _marker: PhantomData<&'a Node<T>>,
 }
 
 impl<'a, T: ?Sized> Iterator for Iter<'a, T> {
@@ -298,7 +313,7 @@ impl<T: ?Sized> ExactSizeIterator for Iter<'_, T> {
 
 pub struct IterMut<'a, T: ?Sized> {
     iter_ptr: IterPtrWithLen<T>,
-    _marker: PhantomData<&'a mut LinkedList<T>>,
+    _marker: PhantomData<&'a mut Node<T>>,
 }
 
 impl<'a, T: ?Sized> Iterator for IterMut<'a, T> {
@@ -338,15 +353,33 @@ impl<T: ?Sized> ExactSizeIterator for IterMut<'_, T> {
     }
 }
 
-impl<T: Debug + ?Sized> Debug for LinkedList<T> {
+impl<T: Debug + ?Sized, A: Allocator + Clone> Debug for LinkedList<T, A> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.list.fmt(f)
     }
 }
 
-impl<T: ?Sized> Default for LinkedList<T> {
+impl<T: ?Sized> Default for LinkedList<T, Global> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl<T, const N: usize> From<[T; N]> for LinkedList<T, Global> {
+    fn from(value: [T; N]) -> Self {
+        value.into_iter().collect()
+    }
+}
+
+impl<T> From<Vec<T>> for LinkedList<T, Global> {
+    fn from(value: Vec<T>) -> Self {
+        value.into_iter().collect()
+    }
+}
+
+impl<T: Clone> From<&[T]> for LinkedList<T, Global> {
+    fn from(value: &[T]) -> Self {
+        value.iter().cloned().collect()
     }
 }
 
@@ -357,8 +390,8 @@ impl<T: ?Sized> Default for LinkedList<T> {
 
 pub type Pointer<T> = base::Pointer<T>;
 
-impl<T: ?Sized> LinkedList<T> {
-    unsafe fn cut_node(&mut self, pointer: Pointer<T>) -> Box<Node<T>> {
+impl<T: ?Sized, A: Allocator + Clone> LinkedList<T, A> {
+    unsafe fn cut_node(&mut self, pointer: Pointer<T>) -> Box<Node<T>, A> {
         self.len = self.len.saturating_sub(1);
         self.list.cut_node(pointer.into())
     }
@@ -382,12 +415,12 @@ impl<T: ?Sized> LinkedList<T> {
 
 pub type Cursor<'a, T> = base::Cursor<'a, T>;
 
-pub struct CursorMutWithoutIndex<'a, T: ?Sized> {
+pub struct CursorMutWithoutIndex<'a, T: ?Sized, A: Allocator + Clone> {
     pointer: Option<Pointer<T>>,
-    list: &'a mut LinkedList<T>,
+    list: &'a mut LinkedList<T, A>,
 }
 
-impl<'a, T: ?Sized> CursorMutWithoutIndex<'a, T> {
+impl<'a, T: ?Sized, A: Allocator + Clone> CursorMutWithoutIndex<'a, T, A> {
     pub fn move_next(&mut self) {
         unsafe {
             self.pointer = self.list.list.next_pointer(self.pointer);
@@ -400,7 +433,7 @@ impl<'a, T: ?Sized> CursorMutWithoutIndex<'a, T> {
         }
     }
 
-    fn cut_node_current(&mut self) -> Option<Box<Node<T>>> {
+    fn cut_node_current(&mut self) -> Option<Box<Node<T>, A>> {
         self.pointer.map(|pointer| unsafe {
             self.pointer = pointer.next();
             self.list.cut_node(pointer)
@@ -415,21 +448,25 @@ impl<'a, T: ?Sized> CursorMutWithoutIndex<'a, T> {
         self.pointer = Some(pointer);
     }
 
-    pub fn list(&mut self) -> &mut LinkedList<T> {
+    pub fn list(&mut self) -> &mut LinkedList<T, A> {
         self.list
     }
 
-    pub fn splice_after(&mut self, list: LinkedList<T>) {
+    pub fn splice_after(&mut self, list: LinkedList<T, A>) {
         self.list.len += list.len;
         unsafe {
-            self.list.list.splice_after_with_pointer(self.pointer, list.list)
+            self.list
+                .list
+                .splice_after_with_pointer(self.pointer, list.list)
         }
     }
 
-    pub fn splice_before(&mut self, list: LinkedList<T>) {
+    pub fn splice_before(&mut self, list: LinkedList<T, A>) {
         self.list.len += list.len;
         unsafe {
-            self.list.list.splice_before_with_pointer(self.pointer, list.list)
+            self.list
+                .list
+                .splice_before_with_pointer(self.pointer, list.list)
         }
     }
 
@@ -442,13 +479,35 @@ impl<'a, T: ?Sized> CursorMutWithoutIndex<'a, T> {
     }
 
     pub fn get_mut(&mut self) -> Option<&mut T> {
+        unsafe { self.pointer.map(|pointer| self.list.list.get_mut(pointer)) }
+    }
+
+    pub unsafe fn add_index_unchecked(self, index: usize) -> CursorMut<'a, T, A> {
+        CursorMut {
+            cursor: self,
+            index,
+        }
+    }
+
+    pub fn add_index(self) -> CursorMut<'a, T, A> {
         unsafe {
-            self.pointer.map(|pointer| self.list.list.get_mut(pointer))
+            let index = if let Some(pointer) = self.pointer {
+                self.list
+                    .list
+                    .iter_ptr()
+                    .enumerate()
+                    .find(|(_, ptr)| *ptr == pointer.as_ptr_node())
+                    .map(|(i, _)| i)
+                    .unwrap_unchecked()
+            } else {
+                self.list.len
+            };
+            self.add_index_unchecked(index)
         }
     }
 }
 
-impl<'a, T> CursorMutWithoutIndex<'a, T> {
+impl<'a, T, A: Allocator + Clone> CursorMutWithoutIndex<'a, T, A> {
     pub fn cut_current(&mut self) -> Option<T> {
         self.cut_node_current().map(|node| node.into_value())
     }
@@ -468,12 +527,12 @@ impl<'a, T> CursorMutWithoutIndex<'a, T> {
     }
 }
 
-pub struct CursorMut<'a, T: ?Sized> {
-    cursor: CursorMutWithoutIndex<'a, T>,
+pub struct CursorMut<'a, T: ?Sized, A: Allocator + Clone> {
+    cursor: CursorMutWithoutIndex<'a, T, A>,
     index: usize,
 }
 
-impl<'a, T: ?Sized> CursorMut<'a, T> {
+impl<'a, T: ?Sized, A: Allocator + Clone> CursorMut<'a, T, A> {
     pub fn move_next(&mut self) {
         self.index = if self.index == self.cursor.list.len {
             0
@@ -488,7 +547,7 @@ impl<'a, T: ?Sized> CursorMut<'a, T> {
         self.cursor.move_prev();
     }
 
-    fn cut_node_current(&mut self) -> Option<Box<Node<T>>> {
+    fn cut_node_current(&mut self) -> Option<Box<Node<T>, A>> {
         self.cursor.cut_node_current()
     }
 
@@ -496,23 +555,23 @@ impl<'a, T: ?Sized> CursorMut<'a, T> {
         drop(self.cut_node_current());
     }
 
-    pub fn list(&mut self) -> &mut LinkedList<T> {
+    pub fn list(&mut self) -> &mut LinkedList<T, A> {
         self.cursor.list
     }
 
-    pub fn splice_after(&mut self, list: LinkedList<T>) {
+    pub fn splice_after(&mut self, list: LinkedList<T, A>) {
         self.cursor.splice_after(list);
         if self.cursor.pointer.is_none() {
             self.index = self.cursor.list.len;
         }
     }
 
-    pub fn splice_before(&mut self, list: LinkedList<T>) {
+    pub fn splice_before(&mut self, list: LinkedList<T, A>) {
         self.index += list.len;
         self.cursor.splice_before(list);
     }
 
-    pub fn split_after(&mut self) -> LinkedList<T> {
+    pub fn split_after(&mut self) -> LinkedList<T, A> {
         let new_len = if self.index == self.cursor.list.len {
             self.index = 0;
             0
@@ -523,23 +582,35 @@ impl<'a, T: ?Sized> CursorMut<'a, T> {
         unsafe {
             LinkedList {
                 len: old_len - new_len,
-                list: self.cursor.list.list.split_after_with_pointer(self.cursor.pointer),
+                list: self
+                    .cursor
+                    .list
+                    .list
+                    .split_after_with_pointer(self.cursor.pointer),
             }
         }
     }
 
-    pub fn split_before(&mut self) -> LinkedList<T> {
+    pub fn split_before(&mut self) -> LinkedList<T, A> {
         self.cursor.list.len -= self.index;
         unsafe {
             LinkedList {
                 len: mem::replace(&mut self.index, 0),
-                list: self.cursor.list.list.split_before_with_pointer(self.cursor.pointer),
+                list: self
+                    .cursor
+                    .list
+                    .list
+                    .split_before_with_pointer(self.cursor.pointer),
             }
         }
     }
 
     pub fn is_dummy(&self) -> bool {
         self.cursor.is_dummy()
+    }
+
+    pub fn index(&self) -> usize {
+        self.index
     }
 
     pub fn get(&self) -> Option<&T> {
@@ -550,12 +621,12 @@ impl<'a, T: ?Sized> CursorMut<'a, T> {
         self.cursor.get_mut()
     }
 
-    pub fn downgrade(self) -> CursorMutWithoutIndex<'a, T> {
+    pub fn downgrade(self) -> CursorMutWithoutIndex<'a, T, A> {
         self.cursor
     }
 }
 
-impl<'a, T> CursorMut<'a, T> {
+impl<'a, T, A: Allocator + Clone> CursorMut<'a, T, A> {
     pub fn cut_current(&mut self) -> Option<T> {
         self.cut_node_current().map(|node| node.into_value())
     }
@@ -570,6 +641,12 @@ impl<'a, T> CursorMut<'a, T> {
     pub fn insert_before(&mut self, value: T) {
         self.index += 1;
         self.cursor.insert_before(value);
+    }
+}
+
+impl<'a, T, A: Allocator + Clone> From<CursorMut<'a, T, A>> for CursorMutWithoutIndex<'a, T, A> {
+    fn from(value: CursorMut<'a, T, A>) -> Self {
+        value.cursor
     }
 }
 
@@ -684,7 +761,7 @@ mod tests {
         assert!(cursor.is_dummy());
         cursor.move_next();
         assert!(cursor.is_dummy());
-        
+
         cursor.insert_after(30);
         assert_eq!(cursor.list().len(), 1);
         cursor.insert_after(25);
@@ -765,5 +842,17 @@ mod tests {
         let mut cursor = list.cursor_front_mut();
         cursor.splice_before(splitted);
         assert!(list.iter().eq(&[3, 3, 4, 5, 5, 4]));
+    }
+
+    #[test]
+    fn set_index_test() {
+        let mut list = LinkedList::from([2u32, 6, 9, 3, 9, 9]);
+        let mut cursor = list.cursor_back_mut();
+        let index = cursor.index;
+        cursor.insert_after(5);
+        cursor.insert_after(7);
+        let cursor = cursor.downgrade();
+        let cursor = cursor.add_index();
+        assert_eq!(index, cursor.index());
     }
 }
