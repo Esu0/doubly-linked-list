@@ -454,11 +454,7 @@ impl<'a, T: ?Sized, A: Allocator + Clone> CursorMutWithoutIndex<'a, T, A> {
 
     pub fn splice_after(&mut self, list: LinkedList<T, A>) {
         self.list.len += list.len;
-        unsafe {
-            self.list
-                .list
-                .splice_after_with_pointer(self.pointer, list.list)
-        }
+        unsafe { self.list.list.splice_after_pointer(self.pointer, list.list) }
     }
 
     pub fn splice_before(&mut self, list: LinkedList<T, A>) {
@@ -466,7 +462,7 @@ impl<'a, T: ?Sized, A: Allocator + Clone> CursorMutWithoutIndex<'a, T, A> {
         unsafe {
             self.list
                 .list
-                .splice_before_with_pointer(self.pointer, list.list)
+                .splice_before_pointer(self.pointer, list.list)
         }
     }
 
@@ -586,7 +582,7 @@ impl<'a, T: ?Sized, A: Allocator + Clone> CursorMut<'a, T, A> {
                     .cursor
                     .list
                     .list
-                    .split_after_with_pointer(self.cursor.pointer),
+                    .split_after_pointer(self.cursor.pointer),
             }
         }
     }
@@ -600,7 +596,7 @@ impl<'a, T: ?Sized, A: Allocator + Clone> CursorMut<'a, T, A> {
                     .cursor
                     .list
                     .list
-                    .split_before_with_pointer(self.cursor.pointer),
+                    .split_before_pointer(self.cursor.pointer),
             }
         }
     }

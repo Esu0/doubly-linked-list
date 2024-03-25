@@ -14,8 +14,8 @@ pub struct LinkedList<T: ?Sized, A: Allocator + Clone = Global> {
     _marker: PhantomData<Box<Node<T>, A>>,
 }
 
-unsafe impl<T: Send> Send for LinkedList<T> {}
-unsafe impl<T: Sync> Sync for LinkedList<T> {}
+unsafe impl<T: Send, A: Send + Allocator + Clone> Send for LinkedList<T, A> {}
+unsafe impl<T: Sync, A: Sync + Allocator + Clone> Sync for LinkedList<T, A> {}
 
 type Link<T> = Option<NonNull<Node<T>>>;
 
@@ -48,42 +48,11 @@ impl<T, A: Allocator + Clone> LinkedList<T, A> {
     }
 
     pub fn push_front(&mut self, value: T) {
-        let new_node = Self::new_node_ptr(
-            Node {
-                prev: None,
-                next: self.head,
-                value,
-            },
-            self.alloc.clone(),
-        );
-        if let Some(mut head) = self.head {
-            unsafe {
-                head.as_mut().prev = Some(new_node);
-            }
-        } else {
-            self.tail = Some(new_node);
-        }
-        self.head = Some(new_node);
+        self.push_front_pointer(value);
     }
 
     pub fn push_back(&mut self, value: T) {
-        let new_node = Self::new_node_ptr(
-            Node {
-                prev: self.tail,
-                next: None,
-                value,
-            },
-            self.alloc.clone(),
-        );
-
-        if let Some(mut tail) = self.tail {
-            unsafe {
-                tail.as_mut().next = Some(new_node);
-            }
-        } else {
-            self.head = Some(new_node);
-        }
-        self.tail = Some(new_node);
+        self.push_back_pointer(value);
     }
 
     pub fn pop_front(&mut self) -> Option<T> {
@@ -148,7 +117,11 @@ impl<T: ?Sized, A: Allocator + Clone> LinkedList<T, A> {
         }
     }
 
-    pub(crate) const unsafe fn from_raw_parts_in(head: Option<NonNull<Node<T>>>, tail: Option<NonNull<Node<T>>>, alloc: A) -> Self {
+    pub(crate) const unsafe fn from_raw_parts_in(
+        head: Option<NonNull<Node<T>>>,
+        tail: Option<NonNull<Node<T>>>,
+        alloc: A,
+    ) -> Self {
         Self {
             head,
             tail,
@@ -352,7 +325,7 @@ impl<T, A: Allocator + Clone> Drop for IntoIter<T, A> {
 
 pub struct Iter<'a, T: ?Sized> {
     iter_ptr: IterPtr<T>,
-    _marker: PhantomData<&'a Node<T>>,
+    _marker: PhantomData<&'a LinkedList<T>>,
 }
 
 impl<'a, T: ?Sized> Iterator for Iter<'a, T> {
@@ -375,7 +348,7 @@ impl<'a, T: ?Sized> DoubleEndedIterator for Iter<'a, T> {
 
 pub struct IterMut<'a, T: ?Sized> {
     iter_ptr: IterPtr<T>,
-    _marker: PhantomData<&'a mut Node<T>>,
+    _marker: PhantomData<&'a mut LinkedList<T>>,
 }
 
 impl<'a, T: ?Sized> Iterator for IterMut<'a, T> {
@@ -400,6 +373,9 @@ pub(crate) struct IterPtr<T: ?Sized> {
     head: Link<T>,
     tail: Link<T>,
 }
+
+unsafe impl<T: ?Sized> Send for IterPtr<T> {}
+unsafe impl<T: ?Sized> Sync for IterPtr<T> {}
 
 impl<T: ?Sized> Clone for IterPtr<T> {
     fn clone(&self) -> Self {
@@ -529,6 +505,9 @@ impl<T: Ord, A: Allocator + Clone> Ord for LinkedList<T, A> {
 
 pub struct Pointer<T: ?Sized>(NonNull<Node<T>>);
 
+unsafe impl<T: ?Sized> Send for Pointer<T> {}
+unsafe impl<T: ?Sized> Sync for Pointer<T> {}
+
 impl<T: ?Sized> Clone for Pointer<T> {
     fn clone(&self) -> Self {
         Self(self.0)
@@ -537,16 +516,28 @@ impl<T: ?Sized> Clone for Pointer<T> {
 
 impl<T: ?Sized> Copy for Pointer<T> {}
 
+impl<T: ?Sized> PartialEq for Pointer<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.eq(&other.0)
+    }
+
+    fn ne(&self, other: &Self) -> bool {
+        self.0.ne(&other.0)
+    }
+}
+
+impl<T: ?Sized> Eq for Pointer<T> {}
+
 impl<T: ?Sized> Pointer<T> {
     unsafe fn into_boxed_node<A: Allocator + Clone>(self, alloc: A) -> Box<Node<T>, A> {
         Box::from_raw_in(self.0.as_ptr(), alloc)
     }
 
-    unsafe fn get<'a>(self) -> &'a Node<T> {
+    pub(crate) unsafe fn get<'a>(self) -> &'a Node<T> {
         &*self.0.as_ptr()
     }
 
-    unsafe fn get_mut<'a>(self) -> &'a mut Node<T> {
+    pub(crate) unsafe fn get_mut<'a>(self) -> &'a mut Node<T> {
         &mut *self.0.as_ptr()
     }
 
@@ -638,7 +629,7 @@ impl<T: ?Sized, A: Allocator + Clone> LinkedList<T, A> {
         }
     }
 
-    pub unsafe fn splice_after_with_pointer(&mut self, pointer: Option<Pointer<T>>, list: Self) {
+    pub unsafe fn splice_after_pointer(&mut self, pointer: Option<Pointer<T>>, list: Self) {
         let Some((mut list_head, mut list_tail)) = list.get_head_tail() else {
             // リストは空なので何もしない
             return;
@@ -675,7 +666,7 @@ impl<T: ?Sized, A: Allocator + Clone> LinkedList<T, A> {
         }
     }
 
-    pub unsafe fn splice_before_with_pointer(&mut self, pointer: Option<Pointer<T>>, list: Self) {
+    pub unsafe fn splice_before_pointer(&mut self, pointer: Option<Pointer<T>>, list: Self) {
         let Some((mut list_head, mut list_tail)) = list.get_head_tail() else {
             return;
         };
@@ -699,7 +690,7 @@ impl<T: ?Sized, A: Allocator + Clone> LinkedList<T, A> {
         }
     }
 
-    pub unsafe fn split_after_with_pointer(&mut self, pointer: Option<Pointer<T>>) -> Self {
+    pub unsafe fn split_after_pointer(&mut self, pointer: Option<Pointer<T>>) -> Self {
         let alloc = self.alloc.clone();
         if let Some(pointer) = pointer {
             let head = pointer.get_mut().next.take();
@@ -715,33 +706,70 @@ impl<T: ?Sized, A: Allocator + Clone> LinkedList<T, A> {
         }
     }
 
-    pub unsafe fn split_before_with_pointer(&mut self, pointer: Option<Pointer<T>>) -> Self {
+    pub unsafe fn split_before_pointer(&mut self, pointer: Option<Pointer<T>>) -> Self {
         let alloc = self.alloc.clone();
         if let Some(pointer) = pointer {
             let tail = pointer.get_mut().prev.take();
             if let Some(mut tail) = tail {
                 let head = self.head.replace(pointer.0);
                 tail.as_mut().next = None;
-                LinkedList::from_raw_parts_in(
-                    head,
-                    Some(tail),
-                    alloc,
-                )
+                LinkedList::from_raw_parts_in(head, Some(tail), alloc)
             } else {
                 LinkedList::new_in(alloc)
             }
         } else {
-            LinkedList::from_raw_parts_in(
-                self.head.take(),
-                self.tail.take(),
-                alloc,
-            )
+            LinkedList::from_raw_parts_in(self.head.take(), self.tail.take(), alloc)
         }
     }
 }
 
 impl<T, A: Allocator + Clone> LinkedList<T, A> {
-    pub unsafe fn insert_after_pointer(&mut self, pointer: Option<Pointer<T>>, value: T) {
+    fn push_front_pointer(&mut self, value: T) -> Pointer<T> {
+        let new_node = Self::new_node_ptr(
+            Node {
+                prev: None,
+                next: self.head,
+                value,
+            },
+            self.alloc.clone(),
+        );
+        if let Some(mut head) = self.head {
+            unsafe {
+                head.as_mut().prev = Some(new_node);
+            }
+        } else {
+            self.tail = Some(new_node);
+        }
+        self.head = Some(new_node);
+        Pointer(new_node)
+    }
+
+    fn push_back_pointer(&mut self, value: T) -> Pointer<T> {
+        let new_node = Self::new_node_ptr(
+            Node {
+                prev: self.tail,
+                next: None,
+                value,
+            },
+            self.alloc.clone(),
+        );
+
+        if let Some(mut tail) = self.tail {
+            unsafe {
+                tail.as_mut().next = Some(new_node);
+            }
+        } else {
+            self.head = Some(new_node);
+        }
+        self.tail = Some(new_node);
+        Pointer(new_node)
+    }
+
+    pub unsafe fn insert_after_pointer(
+        &mut self,
+        pointer: Option<Pointer<T>>,
+        value: T,
+    ) -> Pointer<T> {
         if let Some(pointer) = pointer {
             // ダミーノードでない = 挿入位置は先頭でない
             let next = unsafe { &mut pointer.get_mut().next };
@@ -762,13 +790,18 @@ impl<T, A: Allocator + Clone> LinkedList<T, A> {
                 // 次のノードが存在しない = 現在位置は末尾
                 self.tail = Some(new_node);
             }
+            Pointer(new_node)
         } else {
             // ダミーノードを指しているので先頭に挿入
-            self.push_front(value);
+            self.push_front_pointer(value)
         }
     }
 
-    pub unsafe fn insert_before_pointer(&mut self, pointer: Option<Pointer<T>>, value: T) {
+    pub unsafe fn insert_before_pointer(
+        &mut self,
+        pointer: Option<Pointer<T>>,
+        value: T,
+    ) -> Pointer<T> {
         if let Some(pointer) = pointer {
             let prev = unsafe { &mut pointer.get_mut().next };
             let new_node = LinkedList::new_node_ptr(
@@ -786,13 +819,15 @@ impl<T, A: Allocator + Clone> LinkedList<T, A> {
             } else {
                 self.head = Some(new_node);
             }
+            Pointer(new_node)
         } else {
-            self.push_back(value);
+            self.push_back_pointer(value)
         }
     }
 }
 
-pub struct Cursor<'a, T: ?Sized>(Pointer<T>, PhantomData<&'a Node<T>>);
+// `LinkedList`の共有参照と同等のはたらきをもつ
+pub struct Cursor<'a, T: ?Sized>(Pointer<T>, PhantomData<&'a LinkedList<T>>);
 
 impl<T: ?Sized> Clone for Cursor<'_, T> {
     fn clone(&self) -> Self {
@@ -888,22 +923,22 @@ impl<'a, T: ?Sized, A: Allocator + Clone> CursorMut<'a, T, A> {
 
     pub fn splice_after(&mut self, list: LinkedList<T, A>) {
         unsafe {
-            self.list.splice_after_with_pointer(self.pointer, list);
+            self.list.splice_after_pointer(self.pointer, list);
         }
     }
 
     pub fn splice_before(&mut self, list: LinkedList<T, A>) {
         unsafe {
-            self.list.splice_before_with_pointer(self.pointer, list);
+            self.list.splice_before_pointer(self.pointer, list);
         }
     }
 
     pub fn split_after(&mut self) -> LinkedList<T, A> {
-        unsafe { self.list.split_after_with_pointer(self.pointer) }
+        unsafe { self.list.split_after_pointer(self.pointer) }
     }
 
     pub fn split_before(&mut self) -> LinkedList<T, A> {
-        unsafe { self.list.split_before_with_pointer(self.pointer) }
+        unsafe { self.list.split_before_pointer(self.pointer) }
     }
 }
 
@@ -929,6 +964,8 @@ impl<'a, T, A: Allocator + Clone> CursorMut<'a, T, A> {
 
 #[cfg(test)]
 mod tests {
+    use std::alloc::Layout;
+
     use super::*;
 
     #[test]
@@ -959,6 +996,7 @@ mod tests {
         assert_eq!(list.pop_front(), None);
     }
 
+    use debug_allocator::{Action, DebugAlloc};
     use detect_drop::DetectDrop;
     fn check_send<T: Send>(_: &T) {}
     fn check_sync<T: Sync>(_: &T) {}
@@ -1095,5 +1133,21 @@ mod tests {
         let mut cursor = list.cursor_front_mut();
         cursor.splice_before(splitted);
         assert!(list.iter().eq(&[3, 3, 4, 5, 5, 4]));
+    }
+
+    #[test]
+    fn alloc_test() {
+        let alloc = DebugAlloc::new(Global);
+        let mut list = LinkedList::new_in(alloc.clone());
+        list.push_back(10i32);
+        let action = alloc.history().front().unwrap().clone();
+        assert_eq!(
+            action,
+            Action {
+                addr: list.head.map(|ptr| ptr.cast()),
+                layout: Layout::new::<Node<i32>>(),
+                kind: debug_allocator::Kind::Allocate,
+            }
+        );
     }
 }

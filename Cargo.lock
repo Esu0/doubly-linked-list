@@ -3,6 +3,11 @@
 version = 3
 
 [[package]]
+name = "debug-allocator"
+version = "0.1.2"
+source = "git+https://github.com/Esu0/debug-allocator#45877450341bf9060fa44a9f7d0c070e18feecb9"
+
+[[package]]
 name = "detect-drop"
 version = "0.1.0"
 source = "git+https://github.com/Esu0/detect-drop#10b9a549a4cae41cb31775ea9d07a79889279026"
@@ -11,6 +16,7 @@ source = "git+https://github.com/Esu0/detect-drop#10b9a549a4cae41cb31775ea9d07a7
 name = "doubly-linked-list"
 version = "0.1.0"
 dependencies = [
+ "debug-allocator",
  "detect-drop",
  "thin-dst",
 ]
